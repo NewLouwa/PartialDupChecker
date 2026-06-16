@@ -191,6 +191,8 @@ DEFAULT_CONFIG = {
     "part_min_coverage": 0.90,   # PART: coverage of the shorter clip
     "cut_min_coverage": 0.65,    # CUT/MONTAGE: coverage of the shorter clip
     "cut_min_runs": 2,           # CUT/MONTAGE: >= this many matched runs
+    "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
+    "ffprobe_path": "",          # override; else PDC_FFPROBE env / PATH
 }
 
 
@@ -305,10 +307,13 @@ def _set_status(conn, **fields):
     return st
 
 
-def _ffmpeg_paths():
-    """Locate ffmpeg/ffprobe (env override → PATH → next to Stash)."""
-    ffmpeg = os.environ.get("PDC_FFMPEG") or shutil.which("ffmpeg")
-    ffprobe = os.environ.get("PDC_FFPROBE") or shutil.which("ffprobe")
+def _ffmpeg_paths(cfg=None):
+    """Locate ffmpeg/ffprobe: config override → env override → PATH."""
+    cfg = cfg or {}
+    ffmpeg = (cfg.get("ffmpeg_path") or os.environ.get("PDC_FFMPEG")
+              or shutil.which("ffmpeg"))
+    ffprobe = (cfg.get("ffprobe_path") or os.environ.get("PDC_FFPROBE")
+               or shutil.which("ffprobe"))
     return ffmpeg, ffprobe
 
 
@@ -321,11 +326,231 @@ def _dep_available(name):
 
 
 # --------------------------------------------------------------------------- #
+# Perceptual hashing (64-bit DCT pHash) + LSH bands
+# --------------------------------------------------------------------------- #
+_MASK64 = (1 << 64) - 1
+_DCT32 = None  # cached 32x32 DCT-II basis matrix (numpy)
+
+
+def _dct_matrix(n):
+    """DCT-II basis matrix D[k,i] = cos(pi*(2i+1)*k / 2n). 2-D DCT = D @ img @ D.T.
+
+    The per-axis scale factors are omitted: pHash thresholds each coefficient
+    against the *median*, so any global scaling leaves the resulting bits
+    unchanged. This matches imagehash's phash bits without needing scipy.
+    """
+    import numpy as np
+
+    i = np.arange(n)
+    k = i.reshape(-1, 1)
+    return np.cos(np.pi * (2 * i + 1) * k / (2 * n)).astype("float64")
+
+
+def _phash_from_gray32(arr):
+    """pHash a 32x32 grayscale float array → unsigned 64-bit int."""
+    import numpy as np
+
+    global _DCT32
+    if _DCT32 is None:
+        _DCT32 = _dct_matrix(32)
+    d = _DCT32 @ arr.astype("float64") @ _DCT32.T
+    low = d[:8, :8]
+    med = np.median(low)
+    bits = (low > med).flatten()
+    h = 0
+    for b in bits:
+        h = (h << 1) | int(b)
+    return h
+
+
+def _phash_pil(img):
+    """pHash a PIL image (any size/mode) → unsigned 64-bit int."""
+    import numpy as np
+
+    g = img.convert("L").resize((32, 32))
+    return _phash_from_gray32(np.asarray(g, dtype="float64"))
+
+
+def _hamming(a, b):
+    """Hamming distance between two unsigned ints (0..64 for pHashes)."""
+    return (a ^ b).bit_count()
+
+
+def _bands(phash, band_count):
+    """Split a 64-bit hash into band_count equal sub-words (LSH buckets)."""
+    width = 64 // band_count
+    mask = (1 << width) - 1
+    return [(phash >> (b * width)) & mask for b in range(band_count)]
+
+
+def _u2s(u):
+    """Map an unsigned 64-bit int to signed for SQLite storage (it rejects >=2^63)."""
+    return u - (1 << 64) if u >= (1 << 63) else u
+
+
+def _s2u(s):
+    return s & _MASK64
+
+
+# --------------------------------------------------------------------------- #
+# Fingerprint extraction: sprite fast-pass + ffmpeg deep-pass
+# --------------------------------------------------------------------------- #
+def _vtt_ts(s):
+    """Parse a WebVTT timestamp 'HH:MM:SS.mmm' or 'MM:SS.mmm' → seconds."""
+    s = s.strip()
+    parts = s.split(":")
+    try:
+        if len(parts) == 3:
+            h, m, sec = parts
+            return int(h) * 3600 + int(m) * 60 + float(sec)
+        if len(parts) == 2:
+            m, sec = parts
+            return int(m) * 60 + float(sec)
+        return float(s)
+    except ValueError:
+        return 0.0
+
+
+def _parse_vtt(text):
+    """Parse a Stash sprite VTT → ordered list of (t_start_seconds, (x, y, w, h))."""
+    import re
+
+    out = []
+    for block in re.split(r"\n\s*\n", text.strip()):
+        lines = block.strip().splitlines()
+        t_line = xywh = None
+        for ln in lines:
+            if "-->" in ln:
+                t_line = ln
+            m = re.search(r"#xywh=(\d+),(\d+),(\d+),(\d+)", ln)
+            if m:
+                xywh = tuple(int(x) for x in m.groups())
+        if t_line and xywh:
+            start = t_line.split("-->")[0].strip()
+            out.append((_vtt_ts(start), xywh))
+    out.sort(key=lambda r: r[0])
+    return out
+
+
+def _http_get(url, server_connection, *, binary=False, timeout=60):
+    import requests
+
+    r = requests.get(url, cookies=_stash_cookies(server_connection), timeout=timeout)
+    r.raise_for_status()
+    return r.content if binary else r.text
+
+
+def _sprite_timeline(scene, server_connection):
+    """Fast pass: fetch the scene's sprite sheet + VTT, crop each cell, pHash it.
+
+    Returns an ordered [(t_seconds, phash)] timeline (≈30 s spacing — coarse, good
+    for whole-video DUPLICATE and rough PART; short cuts need the deep pass).
+    """
+    from io import BytesIO
+    from PIL import Image
+
+    if not scene.get("sprite_url") or not scene.get("vtt_url"):
+        raise PdcError("scene has no sprite/vtt (not generated)")
+    cues = _parse_vtt(_http_get(scene["vtt_url"], server_connection))
+    if not cues:
+        raise PdcError("empty/unparseable VTT")
+    sheet = Image.open(BytesIO(_http_get(scene["sprite_url"], server_connection, binary=True)))
+    sheet.load()
+    timeline = []
+    for t, (x, y, w, h) in cues:
+        cell = sheet.crop((x, y, x + w, y + h))
+        timeline.append((t, _phash_pil(cell)))
+    return timeline
+
+
+def _ffmpeg_timeline(path, interval_s, ffmpeg):
+    """Deep pass: sample 1 frame / interval_s, scaled to 32x32 gray, via a raw
+    pipe (no temp files, no Pillow) → ordered [(t_seconds, phash)] timeline."""
+    import subprocess
+
+    import numpy as np
+
+    if not ffmpeg:
+        raise PdcError("ffmpeg not found (set ffmpeg_path or PDC_FFMPEG)")
+    if not path or not os.path.exists(path):
+        raise PdcError(f"file not found: {path}")
+    interval_s = max(0.2, float(interval_s))
+    cmd = [
+        ffmpeg, "-v", "error", "-i", path,
+        "-vf", f"fps=1/{interval_s},scale=32:32,format=gray",
+        "-f", "rawvideo", "pipe:1",
+    ]
+    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    if proc.returncode != 0:
+        raise PdcError(f"ffmpeg failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
+    data = proc.stdout
+    frame = 32 * 32
+    timeline = []
+    for idx in range(len(data) // frame):
+        chunk = data[idx * frame:(idx + 1) * frame]
+        arr = np.frombuffer(chunk, dtype=np.uint8).reshape(32, 32)
+        timeline.append((idx * interval_s, _phash_from_gray32(arr)))
+    return timeline
+
+
+def _file_hash(scene):
+    return (scene.get("oshash") or scene.get("phash")
+            or f"{scene.get('path')}:{scene.get('duration')}")
+
+
+def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
+    """Fingerprint one scene and (re)write its segment + band rows.
+
+    pass_kind: 'fast' (sprite) or 'deep' (ffmpeg). Returns segment count.
+    Skips work if the file hash + pass already match what's indexed.
+    """
+    sid = scene["id"]
+    fh = _file_hash(scene)
+    row = conn.execute(
+        "SELECT file_hash, n_segments, mode FROM scenes WHERE scene_id=?", (sid,)
+    ).fetchone()
+    if row and row["file_hash"] == fh and (row["n_segments"] or 0) > 0 \
+            and row["mode"] == pass_kind:
+        return row["n_segments"]
+
+    if pass_kind == "deep":
+        timeline = _ffmpeg_timeline(scene["path"], cfg["deep_interval_s"], ffmpeg)
+    else:
+        timeline = _sprite_timeline(scene, server_connection)
+
+    band_count = cfg["band_count"]
+    seg_rows, band_rows = [], []
+    for idx, (t, h) in enumerate(timeline):
+        seg_rows.append((sid, idx, t, _u2s(h)))
+        for b, bv in enumerate(_bands(h, band_count)):
+            band_rows.append((b, bv, sid, idx))
+
+    conn.execute("DELETE FROM segments WHERE scene_id=?", (sid,))
+    conn.execute("DELETE FROM hash_bands WHERE scene_id=?", (sid,))
+    conn.executemany("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)", seg_rows)
+    conn.executemany("INSERT INTO hash_bands VALUES (?,?,?,?)", band_rows)
+    conn.execute(
+        "INSERT OR REPLACE INTO scenes "
+        "(scene_id, file_hash, title, path, duration, n_segments, mode, indexed_at) "
+        "VALUES (?,?,?,?,?,?,?,?)",
+        (sid, fh, scene["title"], scene["path"], scene["duration"],
+         len(timeline), pass_kind, time.time()),
+    )
+    conn.commit()
+    return len(timeline)
+
+
+# --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
 def action_check(args):
     """Health/version check + environment report (smoke-test target)."""
-    ffmpeg, ffprobe = _ffmpeg_paths()
+    conn = _connect()
+    try:
+        cfg = _get_config(conn)
+    finally:
+        conn.close()
+    ffmpeg, ffprobe = _ffmpeg_paths(cfg)
     return {
         "version": VERSION,
         "plugin": PLUGIN_ID,
@@ -507,22 +732,53 @@ def _worker_loop(server_connection):
     _log(f"worker started pid={os.getpid()}")
     conn = _connect()
     try:
-        _set_status(conn, running=True, phase="enumerating", worker_pid=os.getpid())
-        scenes = _enumerate_scenes(server_connection)
-        _set_status(conn, scenes_total=len(scenes), phase="enumerated")
-        _log(f"enumerated {len(scenes)} scenes")
+        cfg = _get_config(conn)
+        ffmpeg, _ = _ffmpeg_paths(cfg)
+        # 'deep' mode deep-indexes everything; 'fast'/'hybrid' build the fast
+        # (sprite) index and deep-confirm candidates later during matching.
+        primary = "deep" if cfg.get("mode") == "deep" else "fast"
 
-        # Phase 2+ will fingerprint + index + match here. For now, record the
-        # inventory so the UI/smoke test has something real to show.
-        _meta_set(conn, "last_inventory", [
-            {"id": s["id"], "title": s["title"], "duration": s["duration"],
-             "has_sprite": bool(s["sprite_url"]), "has_phash": bool(s["phash"])}
-            for s in scenes
-        ])
-        _set_status(
-            conn, running=False, phase="done", scenes_done=len(scenes),
-            finished_at=time.time(),
-        )
+        _set_status(conn, running=True, phase="enumerating", worker_pid=os.getpid(),
+                    scenes_done=0, errors=0)
+        scenes = _enumerate_scenes(server_connection)
+        _set_status(conn, scenes_total=len(scenes), phase="indexing")
+        _log(f"enumerated {len(scenes)} scenes; indexing pass={primary}")
+
+        done = errors = total_segments = 0
+        for s in scenes:
+            try:
+                n = _index_scene(conn, s, primary, cfg, server_connection, ffmpeg)
+                # Fast pass empty (no sprite) → fall back to deep if available.
+                if n == 0 and primary == "fast" and ffmpeg:
+                    n = _index_scene(conn, s, "deep", cfg, server_connection, ffmpeg)
+                total_segments += n
+            except Exception as e:
+                errors += 1
+                _log(f"index scene {s.get('id')} failed: {type(e).__name__}: {e}")
+                # As a fallback, try the deep pass when the fast pass errored.
+                if primary == "fast" and ffmpeg:
+                    try:
+                        total_segments += _index_scene(
+                            conn, s, "deep", cfg, server_connection, ffmpeg)
+                        errors -= 1
+                    except Exception as e2:
+                        _log(f"  deep fallback also failed: {e2}")
+            done += 1
+            if done % 5 == 0 or done == len(scenes):
+                _set_status(conn, scenes_done=done, errors=errors,
+                            segments=total_segments)
+
+        _set_status(conn, scenes_done=done, errors=errors, segments=total_segments,
+                    phase="matching")
+        _log(f"indexed {done} scenes, {total_segments} segments, {errors} errors")
+
+        # Phase 3 plugs matching + classification in here:
+        groups = 0
+        if "_match_and_classify" in globals():
+            groups = globals()["_match_and_classify"](conn, cfg)
+
+        _set_status(conn, running=False, phase="done", groups=groups,
+                    finished_at=time.time())
     except Exception as e:
         _log(f"worker error: {type(e).__name__}: {e}")
         try:
