@@ -1,0 +1,22 @@
+name: Partial Duplicate Checker
+description: Finds partial video duplicates Stash's whole-file phash misses — cuts, parts, and montages — classified into Duplicate / Part / Cut-Montage. Complements the built-in duplicate checker; never mutates the library unless you opt in.
+version: 0.1.0
+ui:
+  javascript:
+    - partialdup.js
+  css:
+    - partialdup.css
+# exec[0] is `python` for prod (Alpine python3.12). On the local Windows test
+# Stash, re-pin the deployed copy to the 3.11 interpreter, e.g.:
+#   - C:/Users/Louis/AppData/Local/Programs/Python/Python311/python.exe
+exec:
+  - python
+  - "{pluginDir}/partialdup.py"
+interface: raw
+tasks:
+  # The JS UI calls actions via runPluginOperation(args:{action:...}); this task
+  # also lets a user kick off a full scan from Settings ▸ Tasks.
+  - name: Scan Library for Partial Duplicates
+    description: Fingerprint the library and detect partial/cut/montage duplicates.
+    defaultArgs:
+      action: scan

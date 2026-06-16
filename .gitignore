@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+_vendor/
+*.sqlite
+*.sqlite-journal
+*.worker.log
+test_*.sqlite
