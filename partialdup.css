@@ -100,5 +100,6 @@
 
 .pdc-actions { display: flex; gap: .5rem; margin-top: .75rem; }
 
-/* Best-effort banner injected at the top of the native duplicate-checker page. */
-.pdc-native-banner { padding: .5rem 0 1rem; }
+/* Main-nav menu entry. */
+.pdc-menu-link { display: flex; align-items: center; gap: .5rem; cursor: pointer; }
+.pdc-menu-label { white-space: nowrap; }

@@ -37,8 +37,8 @@ hash, so it can localize *which parts* of two scenes overlap.
 
 ## Use
 
-Open **Partial Duplicate Checker** from the navbar button (there's also a link on
-the built-in Duplicate Checker page where supported), then:
+Open **Partial Duplicate Checker** from the main nav menu (or the navbar icon),
+then:
 
 1. Click **Scan library**. The scan runs in a detached background worker, so it
    keeps going if you close the tab; progress shows live.

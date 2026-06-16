@@ -239,17 +239,26 @@
     });
   } catch (e) { console.error(`${LOG} navbar patch failed`, e); }
 
-  // Best-effort: surface a link on the native Duplicate Checker page so the two
-  // tools sit together. If the component isn't patchable in this Stash build the
-  // patch simply never fires — the nav button remains the reliable entry point.
+  // Stash v0.31.1 exposes only 4 patchable components (Icon, LoadingIndicator,
+  // MainNavBar.MenuItems, MainNavBar.UtilityItems). The Settings▸Tools page and
+  // the built-in Duplicate Checker page are NOT patchable, so we can't graft a tab
+  // there — the most integrated available entry is a first-class main-nav menu item.
   try {
-    api.patch.after("SceneDuplicateChecker", function (props, _, result) {
-      const banner = React.createElement("div", { className: "pdc-native-banner", key: "pdc-banner" },
-        React.createElement(Button, { size: "sm", variant: "info", onClick: () => navigateTo(ROUTE) },
-          "→ Partial Duplicate Checker (cuts / parts / montages)"));
-      return React.createElement(React.Fragment, null, banner, result);
+    api.patch.before("MainNavBar.MenuItems", function (props) {
+      const link = React.createElement(
+        "div",
+        {
+          key: "pdc-menu", className: "nav-link pdc-menu-link", role: "button",
+          onClick: () => navigateTo(ROUTE), title: "Partial Duplicate Checker",
+        },
+        React.createElement(Icon, { icon: FA.faClone }),
+        React.createElement("span", { className: "pdc-menu-label" }, "Partial Dup")
+      );
+      return [{
+        children: React.createElement(React.Fragment, null, props.children, link),
+      }];
     });
-  } catch (e) { /* component not patchable in this build — fine */ }
+  } catch (e) { console.error(`${LOG} menu patch failed`, e); }
 
   console.log(`${LOG} plugin loaded (v0.1.0)`);
 })();
