@@ -31,9 +31,17 @@ hash, so it can localize *which parts* of two scenes overlap.
    - Windows: `./install.ps1`
    - Linux/macOS: `./install.sh` (or `./install.sh user@host` to deploy over SSH)
 2. In Stash: **Settings ▸ Plugins ▸ Reload Plugins**.
-3. Dependencies: Python 3.9+ with `requests`, `Pillow`, `numpy`, and `ffmpeg`/`ffprobe`
-   on `PATH` (or set the `ffmpeg_path`/`ffprobe_path` config, or `PDC_FFMPEG`/`PDC_FFPROBE`
-   env). On Alpine: `apk add ffmpeg py3-numpy py3-pillow`.
+3. Dependencies: `requests`, `Pillow`, `numpy`, and `ffmpeg`/`ffprobe`.
+   - **Self-contained option:** run `./build_vendor.sh` (or `build_vendor.ps1`) to
+     bundle the Python deps into `_vendor/`; the installers copy it along, so no
+     pip/apk step is needed on the target. `_vendor/` is a *fallback* — a host that
+     already has the deps installed ignores it — so the same bundle is safe on any
+     platform. Defaults build musllinux/cp312 wheels for the Alpine Stash container.
+   - **Or install normally:** `pip install requests pillow numpy` (Alpine:
+     `apk add py3-numpy py3-pillow` + requests).
+   - `ffmpeg`/`ffprobe` must be on `PATH` (or set the `ffmpeg_path`/`ffprobe_path`
+     config, or `PDC_FFMPEG`/`PDC_FFPROBE` env). The lazy imports mean the plugin
+     still loads and `check` works without the deps — it just reports what's missing.
 
 ## Use
 

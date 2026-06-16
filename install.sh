@@ -23,6 +23,9 @@ if [[ "${1:-}" == *@* ]]; then
   [[ -n "$TARGET" ]] || { echo "no plugins dir on $REMOTE"; exit 1; }
   ssh "$REMOTE" "mkdir -p '$TARGET/$PLUGIN_ID'"
   for f in "${FILES[@]}"; do scp "$SCRIPT_DIR/$f" "$REMOTE:$TARGET/$PLUGIN_ID/$f"; done
+  if [[ -d "$SCRIPT_DIR/_vendor" ]]; then
+    scp -r "$SCRIPT_DIR/_vendor" "$REMOTE:$TARGET/$PLUGIN_ID/" && echo "  + bundled _vendor/ deps"
+  fi
   echo "Installed to $REMOTE:$TARGET/$PLUGIN_ID"
 else
   TARGET="${1:-}"
@@ -32,6 +35,9 @@ else
   [[ -n "$TARGET" ]] || { echo "no plugins dir found; pass one as an argument"; exit 1; }
   mkdir -p "$TARGET/$PLUGIN_ID"
   for f in "${FILES[@]}"; do cp "$SCRIPT_DIR/$f" "$TARGET/$PLUGIN_ID/$f"; done
+  if [[ -d "$SCRIPT_DIR/_vendor" ]]; then
+    cp -r "$SCRIPT_DIR/_vendor" "$TARGET/$PLUGIN_ID/" && echo "  + bundled _vendor/ deps"
+  fi
   echo "Installed to $TARGET/$PLUGIN_ID"
 fi
 

@@ -29,6 +29,13 @@ New-Item -ItemType Directory -Path $Dest -Force | Out-Null
 foreach ($f in $Files) {
     Copy-Item -Path (Join-Path $ScriptDir $f) -Destination (Join-Path $Dest $f) -Force
 }
+$vendor = Join-Path $ScriptDir "_vendor"
+if (Test-Path $vendor) {
+    Copy-Item -Path $vendor -Destination $Dest -Recurse -Force
+    Write-Host "  + bundled _vendor/ deps (self-contained)" -ForegroundColor Green
+}
 Write-Host "Installed to $Dest" -ForegroundColor Green
 Write-Host "Next: Stash -> Settings -> Plugins -> Reload Plugins." -ForegroundColor Yellow
-Write-Host "Ensure python deps are present: pip install requests pillow numpy" -ForegroundColor Yellow
+if (-not (Test-Path $vendor)) {
+    Write-Host "No _vendor/ bundled - ensure python deps: pip install requests pillow numpy (or run build_vendor.ps1)" -ForegroundColor Yellow
+}

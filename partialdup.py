@@ -38,12 +38,16 @@ import sys
 import tempfile
 import time
 
-# Vendor-aware import: if a bundled _vendor/ dir sits next to this file (offline
-# / Alpine installs), put it first on sys.path so `requests` etc. resolve there.
-# Mirrors the MEGA Import plugin so the same file works on Windows + Alpine.
+# Vendor-aware import: if a bundled _vendor/ dir sits next to this file, add it as
+# a FALLBACK (append, not prepend) so the system/installed packages always win and
+# _vendor is used only when a dep is otherwise missing. This is essential because
+# _vendor ships platform-specific binaries (numpy/Pillow musllinux wheels for the
+# Alpine prod container) — prepending would shadow the local install and crash on
+# a different platform (e.g. Windows). Appending lets the same folder work on both:
+# local uses its installed numpy/Pillow; Alpine prod falls through to _vendor.
 _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 if os.path.isdir(_VENDOR) and _VENDOR not in sys.path:
-    sys.path.insert(0, _VENDOR)
+    sys.path.append(_VENDOR)
 
 VERSION = "0.1.0"
 PLUGIN_ID = "partial_dup_checker"
