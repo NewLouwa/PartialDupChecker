@@ -1,10 +1,104 @@
-/* Partial Duplicate Checker — UI styles (scoped to plugin classes so they don't
-   leak into Stash's theme). Fleshed out in Phase 4. */
-.partialdup-page {
-  padding: 1.5rem;
-  max-width: 1100px;
+/* Partial Duplicate Checker — UI styles. Scoped to .pdc-* so nothing leaks into
+   Stash's theme. Colors inherit from Stash (transparent backgrounds + currentColor)
+   so it looks right in both light and dark themes. */
+
+.pdc-page {
+  padding: 1.25rem 1.5rem;
+  max-width: 1200px;
   margin: 0 auto;
 }
-.partialdup-page h3 {
-  margin-bottom: 1rem;
+.pdc-header h3 { margin: 0 0 .25rem; }
+.pdc-sub { opacity: .75; font-size: .9rem; margin-bottom: 1rem; }
+.pdc-sub a { white-space: nowrap; }
+
+.pdc-toolbar {
+  display: flex;
+  align-items: center;
+  gap: .75rem;
+  margin-bottom: .75rem;
 }
+.pdc-status { opacity: .85; font-size: .9rem; display: inline-flex; align-items: center; gap: .4rem; }
+.pdc-error {
+  margin: .5rem 0;
+  padding: .5rem .75rem;
+  border-radius: .25rem;
+  background: rgba(220, 53, 69, .15);
+  color: #ff8a93;
+  font-size: .9rem;
+}
+
+.pdc-tabs { display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.pdc-tab { min-width: 5rem; }
+
+.pdc-empty { opacity: .6; padding: 2rem; text-align: center; }
+
+.pdc-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
+  gap: 1rem;
+}
+
+.pdc-card {
+  border: 1px solid rgba(255, 255, 255, .12);
+  border-left-width: 4px;
+  border-radius: .4rem;
+  padding: .75rem;
+  background: rgba(255, 255, 255, .03);
+}
+.pdc-card.pdc-DUPLICATE { border-left-color: #dc3545; }
+.pdc-card.pdc-PART { border-left-color: #ffc107; }
+.pdc-card.pdc-CUT { border-left-color: #0dcaf0; }
+
+.pdc-card-head {
+  display: flex;
+  align-items: center;
+  gap: .5rem;
+  margin-bottom: .6rem;
+}
+.pdc-conf { opacity: .7; font-size: .8rem; margin-left: auto; }
+
+.pdc-scenes {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: .5rem;
+}
+.pdc-vs { opacity: .5; font-size: 1.1rem; text-align: center; }
+.pdc-scene { display: flex; flex-direction: column; gap: .35rem; min-width: 0; }
+.pdc-thumb {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: .25rem;
+  background: rgba(0, 0, 0, .35);
+  display: block;
+}
+.pdc-scene-meta { display: flex; flex-direction: column; min-width: 0; }
+.pdc-role { font-size: .7rem; text-transform: uppercase; letter-spacing: .03em; opacity: .55; }
+.pdc-title {
+  font-size: .85rem;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pdc-dur { font-size: .75rem; opacity: .6; }
+
+.pdc-detail { margin-top: .6rem; }
+.pdc-cov { font-size: .8rem; opacity: .8; margin-bottom: .25rem; }
+.pdc-ranges {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 8rem;
+  overflow-y: auto;
+  font-size: .78rem;
+  font-family: var(--bs-font-monospace, monospace);
+}
+.pdc-range { display: flex; gap: .25rem; opacity: .85; }
+.pdc-range-arrow { opacity: .5; }
+
+.pdc-actions { display: flex; gap: .5rem; margin-top: .75rem; }
+
+/* Best-effort banner injected at the top of the native duplicate-checker page. */
+.pdc-native-banner { padding: .5rem 0 1rem; }
