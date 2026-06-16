@@ -207,6 +207,16 @@ def _db_path():
 def _connect():
     conn = sqlite3.connect(_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    # WAL + busy_timeout: the detached worker writes for the whole scan while the
+    # request process reads/writes status & results on its own connection. WAL lets
+    # readers proceed during writes; busy_timeout makes every connection wait out a
+    # lock instead of immediately raising "database is locked".
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+        conn.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
     conn.executescript(_SCHEMA)
     return conn
 
@@ -251,14 +261,27 @@ def _pid_alive(pid):
     try:
         if sys.platform.startswith("win"):
             import ctypes
+            from ctypes import wintypes
 
             k = ctypes.windll.kernel32
+            # A Win64 HANDLE is 64-bit; without explicit restype/argtypes ctypes
+            # marshals it through a 32-bit int and can corrupt the handle (wrong
+            # liveness, leaked handle). Pin the signatures.
+            k.OpenProcess.restype = wintypes.HANDLE
+            k.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+            k.GetExitCodeProcess.restype = wintypes.BOOL
+            k.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+            k.CloseHandle.argtypes = [wintypes.HANDLE]
             h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
             if not h:
                 return False
-            code = ctypes.c_ulong()
-            k.GetExitCodeProcess(h, ctypes.byref(code))
-            k.CloseHandle(h)
+            try:
+                code = wintypes.DWORD()
+                ok = k.GetExitCodeProcess(h, ctypes.byref(code))
+            finally:
+                k.CloseHandle(h)
+            if not ok:
+                return True  # query failed → assume alive (avoid spawning a 2nd worker)
             return code.value == 259  # STILL_ACTIVE
         os.kill(pid, 0)
         return True
@@ -525,20 +548,23 @@ def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
     for idx, (t, h) in enumerate(timeline):
         seg_rows.append((sid, idx, t, _u2s(h)))
         for b, bv in enumerate(_bands(h, band_count)):
-            band_rows.append((b, bv, sid, idx))
+            band_rows.append((b, _u2s(bv), sid, idx))  # signed: bands may be 64-bit wide
 
-    conn.execute("DELETE FROM segments WHERE scene_id=?", (sid,))
-    conn.execute("DELETE FROM hash_bands WHERE scene_id=?", (sid,))
-    conn.executemany("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)", seg_rows)
-    conn.executemany("INSERT INTO hash_bands VALUES (?,?,?,?)", band_rows)
-    conn.execute(
-        "INSERT OR REPLACE INTO scenes "
-        "(scene_id, file_hash, title, path, duration, n_segments, mode, indexed_at) "
-        "VALUES (?,?,?,?,?,?,?,?)",
-        (sid, fh, scene["title"], scene["path"], scene["duration"],
-         len(timeline), pass_kind, time.time()),
-    )
-    conn.commit()
+    # Atomic: DELETE both child tables + re-INSERT + upsert the scenes row all
+    # commit together (or roll back together on failure) so a mid-write error
+    # can't leave a stale n_segments with truncated segment/band rows.
+    with conn:
+        conn.execute("DELETE FROM segments WHERE scene_id=?", (sid,))
+        conn.execute("DELETE FROM hash_bands WHERE scene_id=?", (sid,))
+        conn.executemany("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)", seg_rows)
+        conn.executemany("INSERT INTO hash_bands VALUES (?,?,?,?)", band_rows)
+        conn.execute(
+            "INSERT OR REPLACE INTO scenes "
+            "(scene_id, file_hash, title, path, duration, n_segments, mode, indexed_at) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (sid, fh, scene["title"], scene["path"], scene["duration"],
+             len(timeline), pass_kind, time.time()),
+        )
     return len(timeline)
 
 
@@ -664,7 +690,10 @@ def _select_runs(runs, min_run):
 
 def _metrics(runs, len_a, len_b, cfg):
     """Coverage / contiguity / ordering metrics from a clean run decomposition."""
-    sel = _select_runs(runs, cfg["min_run_segs"])
+    # Clamp the min-run filter so a very short scene (e.g. a single-segment
+    # timeline) is still analyzable instead of having its only run discarded.
+    min_run = max(1, min(cfg["min_run_segs"], len_b))
+    sel = _select_runs(runs, min_run)
     covered_a, cb_segs = set(), 0
     for r in sel:
         covered_a.update(range(r["a0"], r["a1"] + 1))
@@ -780,11 +809,19 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
 
     pairs = _candidate_pairs(fast_segs, cfg)
     hybrid = cfg.get("mode") == "hybrid" and bool(ffmpeg)
+    # Hash space per scene ('fast' sprite vs 'deep' ffmpeg). Sprite and ffmpeg
+    # pHashes aren't directly comparable; outside hybrid (which re-fingerprints
+    # both sides deep) we only compare scenes from the same space.
+    modes = {r["scene_id"]: r["mode"]
+             for r in conn.execute("SELECT scene_id, mode FROM scenes")}
     _log(f"matching: {len(fast_segs)} scenes, {len(pairs)} candidate pairs"
          f"{' (deep-confirm)' if hybrid else ''}")
     deep_cache = {}
-    count = 0
+    count = skipped = 0
     for lo, hi in pairs:
+        if not hybrid and modes.get(lo) != modes.get(hi):
+            skipped += 1
+            continue  # cross-space pair — not comparable without deep-confirm
         segs_lo, segs_hi = fast_segs[lo], fast_segs[hi]
         if hybrid:
             dlo = _deep_segments(conn, lo, cfg, ffmpeg, deep_cache)
@@ -804,7 +841,7 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
         )
         count += 1
     conn.commit()
-    _log(f"matching: {count} groups")
+    _log(f"matching: {count} groups ({skipped} cross-space pairs skipped)")
     return count
 
 
@@ -851,6 +888,12 @@ def action_set_config(args):
     unknown = set(updates) - set(DEFAULT_CONFIG)
     if unknown:
         raise PdcError(f"unknown config keys: {sorted(unknown)}")
+    bc = updates.get("band_count")
+    if bc is not None and (not isinstance(bc, int) or bc < 2 or bc > 32 or 64 % bc != 0):
+        raise PdcError("band_count must be an integer that divides 64 and is >= 2 "
+                       "(e.g. 2, 4, 8, 16, 32)")
+    if "mode" in updates and updates["mode"] not in ("fast", "deep", "hybrid"):
+        raise PdcError("mode must be 'fast', 'deep', or 'hybrid'")
     conn = _connect()
     try:
         saved = _meta_get(conn, "config", {}) or {}
@@ -891,14 +934,37 @@ def action_scan(args):
     finally:
         conn.close()
 
-    pid = _spawn_worker(_SERVER_CONNECTION)
+    try:
+        pid = _spawn_worker(_SERVER_CONNECTION)
+    except Exception as e:
+        # Don't leave status stuck at running=True with no worker.
+        conn = _connect()
+        try:
+            _set_status(conn, running=False, phase="error", error=f"spawn failed: {e}")
+        finally:
+            conn.close()
+        raise PdcError(f"failed to start worker: {e}")
 
+    # Worker_pid is set here (same value the worker writes) so the double-start
+    # guard works immediately, before the worker's first status write.
     conn = _connect()
     try:
         _set_status(conn, worker_pid=pid)
     finally:
         conn.close()
     return {"started": True, "worker_pid": pid}
+
+
+def action_reset(args):
+    """Force-clear a stuck scan status. Escape hatch for the rare case where a
+    worker was killed abnormally and its PID was later reused (so the liveness
+    check wrongly reports it alive and blocks new scans)."""
+    conn = _connect()
+    try:
+        _set_status(conn, running=False, phase="reset", worker_pid=None, error=None)
+        return {"reset": True}
+    finally:
+        conn.close()
 
 
 def action_results(args):
@@ -1175,6 +1241,7 @@ ACTIONS = {
     "scan_status": action_scan_status,
     "results": action_results,
     "apply": action_apply,
+    "reset": action_reset,
 }
 
 

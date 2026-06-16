@@ -117,6 +117,20 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(res["error"])
         self.assertIn("unknown config keys", res["error"])
 
+    def test_set_config_rejects_bad_band_count(self):
+        for bad in (1, 3, 5, 33):
+            res = _run_main({"action": "set_config", "config": {"band_count": bad}})
+            self.assertIsNotNone(res["error"], f"band_count={bad} should be rejected")
+            self.assertIn("band_count", res["error"])
+        # valid divisors accepted
+        res = _run_main({"action": "set_config", "config": {"band_count": 8}})
+        self.assertIsNone(res["error"])
+
+    def test_set_config_rejects_bad_mode(self):
+        res = _run_main({"action": "set_config", "config": {"mode": "turbo"}})
+        self.assertIsNotNone(res["error"])
+        self.assertIn("mode", res["error"])
+
 
 class HashTests(unittest.TestCase):
     def test_phash_deterministic(self):
@@ -273,6 +287,15 @@ class MatchTests(unittest.TestCase):
         b = [self.vocab[5]] + _mkframes(30, seed=7)
         res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
         self.assertIsNone(res)
+
+    def test_single_segment_duplicate(self):
+        # Regression: two identical 1-segment scenes must classify (was dropped
+        # by min_run_segs). _match_pair is called directly here (bypassing the
+        # candidate floor) to assert the alignment/classify path is correct.
+        h = self.vocab[3]
+        res = partialdup._match_pair(_segs([h]), _segs([h]), self.cfg)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["level"], "DUPLICATE")
 
     def test_candidate_pairs(self):
         seg_by_scene = {

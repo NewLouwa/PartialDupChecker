@@ -77,12 +77,20 @@ each), `frac_longest_b` (longest single run / len B), `n_sig_runs`, `order_prese
 
 ## Backend actions (`interface: raw`, dispatch on `args["action"]`)
 
-`check`, `scan`, `scan_status`, `results`, `apply`, `get_config`, `set_config`,
-and `__worker` (the detached worker). Each prints `{"output":…, "error":…}`;
-`runPluginOperation` returns `output` directly and turns a non-null `error` into a
-GraphQL error. The scan spawns a **detached** worker (Windows
-`DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`, POSIX `start_new_session`) that
-survives client disconnect and writes progress to the DB `meta` table.
+`check`, `scan`, `scan_status`, `results`, `apply`, `reset`, `get_config`,
+`set_config`, and `__worker` (the detached worker). Each prints
+`{"output":…, "error":…}`; `runPluginOperation` returns `output` directly and turns
+a non-null `error` into a GraphQL error. The scan spawns a **detached** worker
+(Windows `DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP`, POSIX `start_new_session`)
+that survives client disconnect and writes progress to the DB `meta` table.
+`reset` is an escape hatch that clears a stuck `running` status (e.g. if a worker
+was killed abnormally and its PID was later reused); the UI surfaces a "Reset stuck
+scan" button when the status says running but the worker PID is no longer alive.
+
+The DB opens in **WAL** mode with a 30 s `busy_timeout` so the long-running worker's
+writes don't block the request process's reads. WAL needs a local filesystem — keep
+`PDC_DB` on local disk (not an NFS mount); the default `<tmp>/.partialdup.sqlite`
+is fine as long as `TMPDIR`/temp is local.
 
 ## Known limitations / scaling
 

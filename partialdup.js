@@ -157,6 +157,12 @@
       catch (e) { setErr(e.message || String(e)); }
     };
 
+    const resetScan = async () => {
+      setErr(null);
+      try { await run("reset"); const s = await run("scan_status"); setStatus(s); }
+      catch (e) { setErr(e.message || String(e)); }
+    };
+
     const applyGroup = async (group) => {
       try {
         await run("apply", { group_id: group.group_id });
@@ -192,7 +198,13 @@
           : status && status.phase === "done"
             ? React.createElement("span", { className: "pdc-status" },
                 `Last scan: ${status.scenes_done || 0} scenes, ${status.groups || groups.length} groups`)
-            : null),
+            : null,
+        (status && status.running && status.worker_alive === false)
+          ? React.createElement(Button, {
+              size: "sm", variant: "warning", onClick: resetScan,
+              title: "The scan worker is no longer running — clear the stuck status",
+            }, "Reset stuck scan")
+          : null),
       err ? React.createElement("div", { className: "pdc-error" }, `Error: ${err}`) : null,
       React.createElement("div", { className: "pdc-tabs" },
         tabBtn("ALL", "All"), tabBtn("DUPLICATE", "Duplicate"),
