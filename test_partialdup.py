@@ -218,5 +218,73 @@ class FfmpegTimelineTests(unittest.TestCase):
                 os.remove(vid)
 
 
+def _mkframes(n, seed):
+    """A pool of n distinct pseudo-random 64-bit 'frame' hashes."""
+    import numpy as np
+    rng = np.random.default_rng(seed)
+    return [int(x) for x in rng.integers(0, 1 << 64, size=n, dtype="uint64")]
+
+
+def _segs(hashes, spacing=2.0):
+    return [(i, i * spacing, h) for i, h in enumerate(hashes)]
+
+
+class MatchTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = dict(partialdup.DEFAULT_CONFIG)
+        self.vocab = _mkframes(200, seed=42)  # shared "frame" pool
+        self.A = self.vocab[0:60]
+
+    def test_duplicate_identical(self):
+        res = partialdup._match_pair(_segs(self.A), _segs(self.A[:]), self.cfg)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["level"], "DUPLICATE")
+
+    def test_duplicate_reencode_bitflips(self):
+        # Flip 2 bits per frame (Hamming 2 <= segment_hamming) — still DUPLICATE.
+        b = [h ^ 0b11 for h in self.A]
+        res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["level"], "DUPLICATE")
+
+    def test_part_contiguous_chunk(self):
+        # B is a contiguous 30-frame cut out of the 60-frame A.
+        b = self.vocab[20:50]
+        res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["level"], "PART")
+        self.assertEqual(len(res["ranges"]), 1)  # single contiguous run
+
+    def test_cut_montage_reordered_chunks(self):
+        # B = two chunks of A, reordered (montage).
+        b = self.vocab[40:50] + self.vocab[10:20]
+        res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
+        self.assertIsNotNone(res)
+        self.assertEqual(res["level"], "CUT")
+        self.assertGreaterEqual(len(res["ranges"]), 2)
+
+    def test_none_unrelated(self):
+        b = _mkframes(40, seed=99)
+        res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
+        self.assertIsNone(res)
+
+    def test_none_single_frame_overlap(self):
+        # Only 1 shared frame → below min_run_segs → not a match.
+        b = [self.vocab[5]] + _mkframes(30, seed=7)
+        res = partialdup._match_pair(_segs(self.A), _segs(b), self.cfg)
+        self.assertIsNone(res)
+
+    def test_candidate_pairs(self):
+        seg_by_scene = {
+            1: _segs(self.A),
+            2: _segs(self.vocab[20:50]),   # shares 30 frames with 1 → candidate
+            3: _segs(_mkframes(40, seed=123)),  # unrelated → not a candidate
+        }
+        pairs = partialdup._candidate_pairs(seg_by_scene, self.cfg)
+        self.assertIn((1, 2), pairs)
+        self.assertNotIn((1, 3), pairs)
+        self.assertNotIn((2, 3), pairs)
+
+
 if __name__ == "__main__":
     unittest.main()

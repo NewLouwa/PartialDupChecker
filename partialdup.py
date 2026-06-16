@@ -186,11 +186,13 @@ DEFAULT_CONFIG = {
     "deep_interval_s": 2.0,      # ffmpeg deep-pass sampling cadence (seconds)
     "segment_hamming": 8,        # max per-segment Hamming distance for a match
     "band_count": 4,             # LSH bands (64 bits / 4 = 16-bit bands)
-    "min_band_hits": 2,          # candidate must share >= this many band hits
+    "min_candidate_segs": 3,     # scene pair shortlisted if it shares >= this many segments
+    "min_run_segs": 2,           # ignore matched runs shorter than this (noise)
+    "gap_tol": 1,                # tolerate this many missing seeds inside a run
+    "max_bucket": 300,           # skip non-discriminative band buckets (blank frames)
     "dup_min_coverage": 0.95,    # DUPLICATE: coverage both ways
-    "part_min_coverage": 0.90,   # PART: coverage of the shorter clip
-    "cut_min_coverage": 0.65,    # CUT/MONTAGE: coverage of the shorter clip
-    "cut_min_runs": 2,           # CUT/MONTAGE: >= this many matched runs
+    "part_min_coverage": 0.90,   # PART: longest contiguous run as a fraction of the shorter
+    "cut_min_coverage": 0.55,    # CUT/MONTAGE: total coverage of the shorter clip
     "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
     "ffprobe_path": "",          # override; else PDC_FFPROBE env / PATH
 }
@@ -541,6 +543,272 @@ def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
 
 
 # --------------------------------------------------------------------------- #
+# Matching: candidate retrieval → alignment → 3-level classification
+# --------------------------------------------------------------------------- #
+def _candidate_pairs(seg_by_scene, cfg):
+    """Shortlist scene pairs that share enough band-matching segments.
+
+    Uses an LSH band bucket map: segments landing in the same (band_no, band_val)
+    bucket are near-duplicates. Over-popular buckets (blank/black frames) are
+    skipped as non-discriminative. Recall need only surface the *pair* — exact
+    matched segments are recovered later by direct-Hamming alignment.
+    """
+    from collections import defaultdict
+
+    band_count = cfg["band_count"]
+    max_bucket = cfg["max_bucket"]
+    buckets = defaultdict(list)
+    for sid, segs in seg_by_scene.items():
+        for idx, _t, h in segs:
+            for b, bv in enumerate(_bands(h, band_count)):
+                buckets[(b, bv)].append((sid, idx))
+
+    pair_hits = defaultdict(set)  # (lo, hi) -> set of lo-side seg idxs that matched
+    for members in buckets.values():
+        if len(members) > max_bucket or len(members) < 2:
+            continue
+        for a in range(len(members)):
+            sa, ia = members[a]
+            for c in range(a + 1, len(members)):
+                sc, ic = members[c]
+                if sa == sc:
+                    continue
+                if sa < sc:
+                    pair_hits[(sa, sc)].add(ia)
+                else:
+                    pair_hits[(sc, sa)].add(ic)
+    floor = cfg["min_candidate_segs"]
+    return [pair for pair, hits in pair_hits.items() if len(hits) >= floor]
+
+
+def _align_hashes(A, B, cfg):
+    """Diagonal seed-and-extend alignment of two ordered pHash sequences.
+
+    A contiguous copy shows up as a run of seed matches along a constant
+    diagonal (i - j == offset); reordered/spliced montage pieces appear as
+    separate runs on different diagonals. Returns (runs, avg_hamming) where each
+    run = {a0, a1, b0, b1, segs} (inclusive segment-index ranges into A and B).
+    """
+    from collections import defaultdict
+
+    max_h = cfg["segment_hamming"]
+    band_count = cfg["band_count"]
+    gap_tol = cfg["gap_tol"]
+
+    # Seed via B's band buckets, then verify with direct Hamming.
+    bbuckets = defaultdict(list)
+    for j, h in enumerate(B):
+        for b, bv in enumerate(_bands(h, band_count)):
+            bbuckets[(b, bv)].append(j)
+
+    seeds = []
+    ham_sum = 0
+    for i, h in enumerate(A):
+        seen_j = set()
+        for b, bv in enumerate(_bands(h, band_count)):
+            for j in bbuckets.get((b, bv), ()):
+                if j in seen_j:
+                    continue
+                seen_j.add(j)
+                d = _hamming(h, B[j])
+                if d <= max_h:
+                    seeds.append((i, j, d))
+    if not seeds:
+        return [], 0.0
+
+    # Group seeds by diagonal, then split each diagonal into runs at gaps.
+    by_diag = defaultdict(list)
+    for i, j, d in seeds:
+        by_diag[i - j].append((i, j, d))
+    runs = []
+    for pts in by_diag.values():
+        pts.sort()
+        s = 0
+        for k in range(1, len(pts) + 1):
+            if k == len(pts) or pts[k][0] - pts[k - 1][0] > gap_tol + 1:
+                seg = pts[s:k]
+                ham = [p[2] for p in seg]
+                runs.append({
+                    "a0": seg[0][0], "a1": seg[-1][0],
+                    "b0": seg[0][1], "b1": seg[-1][1],
+                    "segs": len(seg),
+                    "avg_h": sum(ham) / len(ham),
+                })
+                ham_sum += sum(ham)
+                s = k
+    total_seeds = sum(r["segs"] for r in runs)
+    avg_hamming = ham_sum / total_seeds if total_seeds else 0.0
+    return runs, avg_hamming
+
+
+def _select_runs(runs, min_run):
+    """Greedy non-overlapping decomposition: longest (lowest-Hamming) runs first,
+    each claiming a B-segment interval no later run may reuse.
+
+    Repetitive/near-static content spawns many overlapping seed runs; attributing
+    each B segment to a single best run yields a clean, minimal set of matched
+    regions (and a meaningful run count) instead of dozens of overlapping ones.
+    """
+    sig = sorted((r for r in runs if r["segs"] >= min_run),
+                 key=lambda r: (-(r["b1"] - r["b0"] + 1), r["avg_h"]))
+    claimed, selected = [], []
+    for r in sig:
+        b0, b1 = r["b0"], r["b1"]
+        if any(not (b1 < c0 or b0 > c1) for c0, c1 in claimed):
+            continue  # B interval overlaps an already-claimed match
+        claimed.append((b0, b1))
+        selected.append(r)
+    selected.sort(key=lambda r: r["b0"])
+    return selected
+
+
+def _metrics(runs, len_a, len_b, cfg):
+    """Coverage / contiguity / ordering metrics from a clean run decomposition."""
+    sel = _select_runs(runs, cfg["min_run_segs"])
+    covered_a, cb_segs = set(), 0
+    for r in sel:
+        covered_a.update(range(r["a0"], r["a1"] + 1))
+        cb_segs += r["b1"] - r["b0"] + 1  # selected runs are non-overlapping in B
+    longest_b = max((r["b1"] - r["b0"] + 1 for r in sel), default=0)
+    order_ok, prev = True, None  # runs sorted by b0; A starts should be monotonic
+    for r in sel:
+        if prev is not None and r["a0"] < prev:
+            order_ok = False
+            break
+        prev = r["a0"]
+    return {
+        "coverage_a": len(covered_a) / len_a if len_a else 0.0,
+        "coverage_b": min(1.0, cb_segs / len_b) if len_b else 0.0,
+        "frac_longest_b": longest_b / len_b if len_b else 0.0,
+        "n_sig_runs": len(sel),
+        "order_preserved": order_ok,
+        "sig_runs": sel,
+    }
+
+
+def _classify(m, cfg):
+    """Map metrics → (level, confidence). A is the longer/containing scene."""
+    cb, ca = m["coverage_b"], m["coverage_a"]
+    if cb >= cfg["dup_min_coverage"] and ca >= cfg["dup_min_coverage"]:
+        return "DUPLICATE", round(min(ca, cb), 3)
+    if m["frac_longest_b"] >= cfg["part_min_coverage"]:
+        # The shorter scene is (almost) one contiguous chunk of the longer one.
+        return "PART", round(m["frac_longest_b"], 3)
+    if cb >= cfg["cut_min_coverage"] and m["n_sig_runs"] >= 1:
+        # Partial / reordered / spliced overlap — a cut or montage.
+        return "CUT", round(cb, 3)
+    return None, 0.0
+
+
+def _match_pair(segs_x, segs_y, cfg):
+    """Align two scenes' segment timelines and classify. Returns a dict or None.
+
+    Picks the longer timeline as A (the containing scene).
+    """
+    if len(segs_x) >= len(segs_y):
+        a_segs, b_segs, swap = segs_x, segs_y, False
+    else:
+        a_segs, b_segs, swap = segs_y, segs_x, True
+    A = [h for _i, _t, h in a_segs]
+    B = [h for _i, _t, h in b_segs]
+    runs, avg_h = _align_hashes(A, B, cfg)
+    if not runs:
+        return None
+    m = _metrics(runs, len(A), len(B), cfg)
+    level, conf = _classify(m, cfg)
+    if not level:
+        return None
+    # Attach time-ranges (a_* on the longer scene, b_* on the shorter).
+    ta = [t for _i, t, _h in a_segs]
+    tb = [t for _i, t, _h in b_segs]
+    ranges = [{
+        "a_start": round(ta[r["a0"]], 2), "a_end": round(ta[r["a1"]], 2),
+        "b_start": round(tb[r["b0"]], 2), "b_end": round(tb[r["b1"]], 2),
+        "segs": r["segs"],
+    } for r in m["sig_runs"]]
+    ranges.sort(key=lambda r: r["b_start"])
+    return {
+        "level": level, "confidence": conf,
+        "coverage_a": round(m["coverage_a"], 3),
+        "coverage_b": round(m["coverage_b"], 3),
+        "avg_hamming": round(avg_h, 2),
+        "ranges": ranges, "swap": swap,
+    }
+
+
+def _load_segments(conn):
+    """Load all indexed segments grouped by scene → {sid: [(idx, t, unsigned_hash)]}."""
+    seg_by_scene = {}
+    rows = conn.execute(
+        "SELECT scene_id, idx, t_seconds, phash FROM segments ORDER BY scene_id, idx"
+    ).fetchall()
+    for r in rows:
+        seg_by_scene.setdefault(r["scene_id"], []).append(
+            (r["idx"], r["t_seconds"], _s2u(r["phash"]))
+        )
+    return seg_by_scene
+
+
+def _deep_segments(conn, sid, cfg, ffmpeg, cache):
+    """Deep-fingerprint a scene on demand (cached), for hybrid confirm. Falls
+    back to None if it can't (caller then keeps the fast timeline)."""
+    if sid in cache:
+        return cache[sid]
+    row = conn.execute("SELECT path FROM scenes WHERE scene_id=?", (sid,)).fetchone()
+    try:
+        tl = _ffmpeg_timeline(row["path"], cfg["deep_interval_s"], ffmpeg) if row else []
+        segs = [(i, t, h) for i, (t, h) in enumerate(tl)]
+    except Exception as e:
+        _log(f"deep-confirm scene {sid} failed: {e}")
+        segs = None
+    cache[sid] = segs
+    return segs
+
+
+def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
+    """Find candidate pairs, align + classify each, persist groups. Returns count.
+
+    Hybrid mode: candidate pairs are shortlisted from the fast (sprite) index,
+    then each candidate scene is deep-fingerprinted (ffmpeg) on demand so the
+    alignment + classification use precise fine-grained timelines.
+    """
+    fast_segs = _load_segments(conn)
+    conn.execute("DELETE FROM groups")
+    conn.commit()
+    if len(fast_segs) < 2:
+        return 0
+
+    pairs = _candidate_pairs(fast_segs, cfg)
+    hybrid = cfg.get("mode") == "hybrid" and bool(ffmpeg)
+    _log(f"matching: {len(fast_segs)} scenes, {len(pairs)} candidate pairs"
+         f"{' (deep-confirm)' if hybrid else ''}")
+    deep_cache = {}
+    count = 0
+    for lo, hi in pairs:
+        segs_lo, segs_hi = fast_segs[lo], fast_segs[hi]
+        if hybrid:
+            dlo = _deep_segments(conn, lo, cfg, ffmpeg, deep_cache)
+            dhi = _deep_segments(conn, hi, cfg, ffmpeg, deep_cache)
+            if dlo and dhi:
+                segs_lo, segs_hi = dlo, dhi
+        res = _match_pair(segs_lo, segs_hi, cfg)
+        if not res:
+            continue
+        # res['swap']=False → A(longer)=lo; True → A(longer)=hi.
+        scene_a, scene_b = (hi, lo) if res["swap"] else (lo, hi)
+        conn.execute(
+            "INSERT INTO groups (level, scene_a, scene_b, confidence, coverage_a, "
+            "coverage_b, runs_json, applied, created_at) VALUES (?,?,?,?,?,?,?,0,?)",
+            (res["level"], scene_a, scene_b, res["confidence"], res["coverage_a"],
+             res["coverage_b"], json.dumps(res["ranges"]), time.time()),
+        )
+        count += 1
+    conn.commit()
+    _log(f"matching: {count} groups")
+    return count
+
+
+# --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
 def action_check(args):
@@ -659,6 +927,12 @@ def action_results(args):
                 g["runs"] = json.loads(g.pop("runs_json") or "[]")
             except (json.JSONDecodeError, TypeError):
                 g["runs"] = []
+            for side in ("scene_a", "scene_b"):
+                meta = conn.execute(
+                    "SELECT title, path, duration FROM scenes WHERE scene_id=?",
+                    (g[side],),
+                ).fetchone()
+                g[side + "_meta"] = dict(meta) if meta else None
             groups.append(g)
         return {"total": total, "limit": limit, "offset": offset, "groups": groups}
     finally:
@@ -772,10 +1046,7 @@ def _worker_loop(server_connection):
                     phase="matching")
         _log(f"indexed {done} scenes, {total_segments} segments, {errors} errors")
 
-        # Phase 3 plugs matching + classification in here:
-        groups = 0
-        if "_match_and_classify" in globals():
-            groups = globals()["_match_and_classify"](conn, cfg)
+        groups = _match_and_classify(conn, cfg, server_connection, ffmpeg)
 
         _set_status(conn, running=False, phase="done", groups=groups,
                     finished_at=time.time())
