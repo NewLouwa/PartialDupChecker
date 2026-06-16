@@ -6,7 +6,7 @@ param([string]$Target = "")
 $ErrorActionPreference = "Stop"
 $PluginId = "partial_dup_checker"
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$Files = @("partialdup_checker.yml", "manifest", "partialdup.py", "partialdup.js", "partialdup.css")
+$Files = @("partial_dup_checker.yml", "manifest", "partialdup.py", "partialdup.js", "partialdup.css")
 
 Write-Host "Running unit tests..." -ForegroundColor Cyan
 & python -m unittest test_partialdup 2>&1 | Out-Host

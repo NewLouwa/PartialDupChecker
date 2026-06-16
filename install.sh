@@ -7,7 +7,7 @@ set -euo pipefail
 
 PLUGIN_ID="partial_dup_checker"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-FILES=(partialdup_checker.yml manifest partialdup.py partialdup.js partialdup.css)
+FILES=(partial_dup_checker.yml manifest partialdup.py partialdup.js partialdup.css)
 DEFAULT_DIRS=("$HOME/.stash/plugins" "/root/.stash/plugins")
 
 echo "Running unit tests..."
