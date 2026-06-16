@@ -530,11 +530,16 @@ def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
     Skips work if the file hash + pass already match what's indexed.
     """
     sid = scene["id"]
+    # Index signature = file identity + pass + (for deep) the sampling interval.
+    # The interval MUST be part of it: the diagonal alignment assumes a uniform
+    # cadence, so two scenes indexed at different intervals can't be matched.
+    # Re-index whenever any of these change.
     fh = _file_hash(scene)
+    sig = f"{fh}|deep|{cfg['deep_interval_s']}" if pass_kind == "deep" else f"{fh}|fast"
     row = conn.execute(
         "SELECT file_hash, n_segments, mode FROM scenes WHERE scene_id=?", (sid,)
     ).fetchone()
-    if row and row["file_hash"] == fh and (row["n_segments"] or 0) > 0 \
+    if row and row["file_hash"] == sig and (row["n_segments"] or 0) > 0 \
             and row["mode"] == pass_kind:
         return row["n_segments"]
 
@@ -562,7 +567,7 @@ def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
             "INSERT OR REPLACE INTO scenes "
             "(scene_id, file_hash, title, path, duration, n_segments, mode, indexed_at) "
             "VALUES (?,?,?,?,?,?,?,?)",
-            (sid, fh, scene["title"], scene["path"], scene["duration"],
+            (sid, sig, scene["title"], scene["path"], scene["duration"],
              len(timeline), pass_kind, time.time()),
         )
     return len(timeline)
