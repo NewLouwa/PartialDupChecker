@@ -286,5 +286,75 @@ class MatchTests(unittest.TestCase):
         self.assertNotIn((2, 3), pairs)
 
 
+class ApplyTests(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(_TMP_DB):
+            os.remove(_TMP_DB)
+        partialdup._SERVER_CONNECTION = {"Scheme": "http", "Port": 9999,
+                                         "SessionCookie": {"Name": "s", "Value": "v"}}
+        # Insert a PART group with two matched ranges.
+        conn = partialdup._connect()
+        for sid, title in ((10, "long"), (11, "clip")):
+            conn.execute("INSERT INTO scenes (scene_id,title,path,duration,n_segments,mode,"
+                         "file_hash,indexed_at) VALUES (?,?,?,?,?,?,?,0)",
+                         (sid, title, f"/x/{sid}.mp4", 100, 10, "deep", f"h{sid}"))
+        conn.execute("INSERT INTO groups (group_id,level,scene_a,scene_b,confidence,"
+                     "coverage_a,coverage_b,runs_json,applied,created_at) "
+                     "VALUES (1,'PART',10,11,0.95,0.3,1.0,?,0,0)",
+                     (json.dumps([{"a_start": 20, "a_end": 40, "b_start": 0, "b_end": 20}]),))
+        conn.commit()
+        conn.close()
+
+    def tearDown(self):
+        partialdup._SERVER_CONNECTION = None
+
+    def _fake_gql(self):
+        calls = []
+
+        def fake(sc, query, variables=None):
+            calls.append((query, variables))
+            if "findTags" in query:
+                return {"findTags": {"tags": []}}            # force create
+            if "tagCreate" in query:
+                return {"tagCreate": {"id": "77"}}
+            if "bulkSceneUpdate" in query:
+                return {"bulkSceneUpdate": [{"id": "10"}]}
+            if "sceneMarkerCreate" in query:
+                return {"sceneMarkerCreate": {"id": "1"}}
+            if "sceneUpdate" in query:
+                return {"sceneUpdate": {"id": "11"}}
+            return {}
+        return fake, calls
+
+    def test_apply_tags_marks_and_sets_applied(self):
+        fake, calls = self._fake_gql()
+        with patch.object(partialdup, "_gql_data", fake):
+            res = _run_main({"action": "apply", "group_id": 1},
+                            server_connection=partialdup._SERVER_CONNECTION)
+        self.assertIsNone(res["error"], res["error"])
+        out = res["output"]
+        self.assertTrue(out["applied"])
+        self.assertEqual(out["tag"], "PartialDup: Part")
+        self.assertEqual(out["markers"], 1)
+        # tag created, both scenes bulk-tagged, marker + custom field written.
+        joined = " ".join(q for q, _ in calls)
+        self.assertIn("tagCreate", joined)
+        self.assertIn("bulkSceneUpdate", joined)
+        self.assertIn("sceneMarkerCreate", joined)
+        # group flagged applied in the DB.
+        conn = partialdup._connect()
+        applied = conn.execute("SELECT applied FROM groups WHERE group_id=1").fetchone()[0]
+        conn.close()
+        self.assertEqual(applied, 1)
+
+    def test_apply_missing_group(self):
+        fake, _ = self._fake_gql()
+        with patch.object(partialdup, "_gql_data", fake):
+            res = _run_main({"action": "apply", "group_id": 999},
+                            server_connection=partialdup._SERVER_CONNECTION)
+        self.assertIsNotNone(res["error"])
+        self.assertIn("not found", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

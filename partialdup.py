@@ -939,6 +939,109 @@ def action_results(args):
         conn.close()
 
 
+# --- opt-in write-back (never automatic; only on explicit user action) ------ #
+_LEVEL_TAG = {
+    "DUPLICATE": "PartialDup: Duplicate",
+    "PART": "PartialDup: Part",
+    "CUT": "PartialDup: Cut/Montage",
+}
+
+
+def _fmt_ts(s):
+    s = int(max(0, round(s or 0)))
+    return f"{s // 60}:{s % 60:02d}"
+
+
+def _find_or_create_tag(sc, name):
+    data = _gql_data(
+        sc,
+        "query($n:String!){findTags(tag_filter:{name:{value:$n,modifier:EQUALS}})"
+        "{tags{id}}}",
+        {"n": name},
+    )
+    tags = (data.get("findTags") or {}).get("tags") or []
+    if tags:
+        return tags[0]["id"]
+    data = _gql_data(sc, "mutation($n:String!){tagCreate(input:{name:$n}){id}}", {"n": name})
+    return (data.get("tagCreate") or {}).get("id")
+
+
+def action_apply(args):
+    """Opt-in: tag both scenes, add scene markers for matched ranges on the
+    longer scene, and record the relationship in a custom field. Manual only."""
+    gid = args.get("group_id")
+    if gid is None:
+        raise PdcError("missing group_id")
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    sc = _SERVER_CONNECTION
+    conn = _connect()
+    try:
+        row = conn.execute("SELECT * FROM groups WHERE group_id=?", (gid,)).fetchone()
+        if not row:
+            raise PdcError(f"group {gid} not found")
+        level, a, b = row["level"], row["scene_a"], row["scene_b"]
+        try:
+            runs = json.loads(row["runs_json"] or "[]")
+        except (json.JSONDecodeError, TypeError):
+            runs = []
+
+        tag_name = _LEVEL_TAG.get(level, "PartialDup")
+        tag_id = _find_or_create_tag(sc, tag_name)
+        # Additive tag on both scenes (bulk ADD never clobbers existing tags).
+        _gql_data(
+            sc,
+            "mutation($ids:[ID!],$t:BulkUpdateIds){bulkSceneUpdate(input:"
+            "{ids:$ids,tag_ids:$t}){id}}",
+            {"ids": [str(a), str(b)], "t": {"mode": "ADD", "ids": [tag_id]}},
+        )
+
+        # Markers on the longer/containing scene at each matched range.
+        markers, warnings = 0, []
+        for r in runs[:25]:
+            try:
+                inp = {
+                    "scene_id": str(a),
+                    "seconds": float(r.get("a_start", 0)),
+                    "title": f"{tag_name} ↔ scene {b} "
+                             f"({_fmt_ts(r.get('b_start'))}-{_fmt_ts(r.get('b_end'))})",
+                    "primary_tag_id": tag_id,
+                }
+                end = float(r.get("a_end", 0))
+                if end > inp["seconds"]:
+                    inp["end_seconds"] = end
+                _gql_data(
+                    sc,
+                    "mutation($i:SceneMarkerCreateInput!){sceneMarkerCreate(input:$i){id}}",
+                    {"i": inp},
+                )
+                markers += 1
+            except PdcError as e:
+                warnings.append(f"markers: {e}")
+                break  # likely an unsupported field — stop trying
+
+        # Relationship metadata on the shorter scene (best effort).
+        try:
+            payload = json.dumps({
+                "level": level, "source_scene": a, "confidence": row["confidence"],
+                "coverage_b": row["coverage_b"], "ranges": runs,
+            })
+            _gql_data(
+                sc,
+                "mutation($i:SceneUpdateInput!){sceneUpdate(input:$i){id}}",
+                {"i": {"id": str(b), "custom_fields": {"partial": {"partial_dup": payload}}}},
+            )
+        except PdcError as e:
+            warnings.append(f"custom_field: {e}")
+
+        conn.execute("UPDATE groups SET applied=1 WHERE group_id=?", (gid,))
+        conn.commit()
+        return {"applied": True, "group_id": gid, "tag": tag_name,
+                "markers": markers, "warnings": warnings}
+    finally:
+        conn.close()
+
+
 # --------------------------------------------------------------------------- #
 # Scene enumeration (GraphQL)
 # --------------------------------------------------------------------------- #
@@ -1071,6 +1174,7 @@ ACTIONS = {
     "scan": action_scan,
     "scan_status": action_scan_status,
     "results": action_results,
+    "apply": action_apply,
 }
 
 
