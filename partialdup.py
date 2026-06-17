@@ -188,7 +188,7 @@ CREATE TABLE IF NOT EXISTS groups (
 DEFAULT_CONFIG = {
     "mode": "hybrid",            # 'fast' | 'deep' | 'hybrid'
     "deep_interval_s": 2.0,      # ffmpeg deep-pass sampling cadence (seconds)
-    "segment_hamming": 8,        # max per-segment Hamming distance for a match
+    "segment_hamming": 6,        # max per-segment Hamming distance for a match (stricter = fewer coincidences)
     "band_count": 4,             # LSH bands (64 bits / 4 = 16-bit bands)
     "min_candidate_segs": 4,     # scene pair shortlisted if it shares >= this many segments
     "min_run_segs": 2,           # ignore matched runs shorter than this (noise)
@@ -201,7 +201,10 @@ DEFAULT_CONFIG = {
     "max_deep_seconds": 900,     # hybrid: wall-clock cap on deep-confirm (guarantees the scan finishes)
     "dup_min_coverage": 0.95,    # DUPLICATE: coverage both ways
     "part_min_coverage": 0.90,   # PART: longest contiguous run as a fraction of the shorter
-    "cut_min_coverage": 0.55,    # CUT/MONTAGE: total coverage of the shorter clip
+    "cut_min_coverage": 0.70,    # CUT/MONTAGE: total coverage of the shorter clip
+    "min_match_seconds": 12.0,   # reject matches whose longest shared run is shorter than this
+                                 # (unless the clip is near-fully covered) — kills scattered
+                                 # coincidental frame matches between similar-looking videos
     "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
     "ffprobe_path": "",          # override; else PDC_FFPROBE env / PATH
 }
@@ -795,6 +798,12 @@ def _match_pair(segs_x, segs_y, cfg):
         "segs": r["segs"],
     } for r in m["sig_runs"]]
     ranges.sort(key=lambda r: r["b_start"])
+    # Evidence gate: a real cut/part shares a meaningful CONTIGUOUS span. Scattered
+    # short coincidental matches (similar-looking but different videos) are rejected
+    # unless the shorter clip is near-fully covered (a genuine tiny clip).
+    longest_sec = max((r["b_end"] - r["b_start"] for r in ranges), default=0.0)
+    if longest_sec < cfg["min_match_seconds"] and m["coverage_b"] < cfg["part_min_coverage"]:
+        return None
     return {
         "level": level, "confidence": conf,
         "coverage_a": round(m["coverage_a"], 3),
