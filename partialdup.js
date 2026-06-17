@@ -2,10 +2,9 @@
 // Partial Duplicate Checker — Stash UI plugin.
 //
 // Complements Stash's built-in (whole-file phash) duplicate checker by surfacing
-// the partial duplicates it misses — cuts, parts, and montages — on a dedicated
-// page with a tab per level (Duplicate / Part / Cut-Montage). Talks to the Python
-// backend via runPluginOperation(args:{action,...}), which returns the action's
-// output object directly (a non-null python `error` becomes a GraphQL error).
+// the partial duplicates it misses — cuts, parts, and montages. Results are
+// CLUSTERED under the longest video of each match group: one box shows the long
+// video (to keep) and all the clips/cuts/dups of it (selectable for deletion).
 (function () {
   const api = window.PluginApi;
   if (!api) {
@@ -13,7 +12,8 @@
     return;
   }
   const React = api.React;
-  const { Button, Badge, Spinner } = api.libraries.Bootstrap;
+  const e = React.createElement;
+  const { Button, Badge, Spinner, Form } = api.libraries.Bootstrap;
   const { gql, useApolloClient } = api.libraries.Apollo;
   const { Icon } = api.components;
   const FA = api.libraries.FontAwesomeSolid;
@@ -24,9 +24,9 @@
   const LOG = "[partialdup]";
 
   const LEVELS = {
-    DUPLICATE: { label: "Duplicate", variant: "danger", blurb: "Same content end-to-end (re-encode / recrop)." },
-    PART: { label: "Part / Contains", variant: "warning", blurb: "One scene is a contiguous chunk of a longer one." },
-    CUT: { label: "Cut / Montage", variant: "info", blurb: "Partial, reordered, or spliced overlap." },
+    DUPLICATE: { label: "Duplicate", variant: "danger" },
+    PART: { label: "Part", variant: "warning" },
+    CUT: { label: "Cut/Montage", variant: "info" },
   };
 
   const RUN_OPERATION = gql`
@@ -42,77 +42,78 @@
 
   const fmtTime = (s) => {
     s = Math.max(0, Math.round(s || 0));
-    const m = Math.floor(s / 60);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
     const ss = String(s % 60).padStart(2, "0");
-    return `${m}:${ss}`;
+    return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
+  };
+  const basename = (p) => (p || "").replace(/\\/g, "/").split("/").pop();
+
+  const thumb = (id, meta, cls) =>
+    e("a", { href: `/scenes/${id}`, target: "_blank", rel: "noreferrer" },
+      e("img", { className: cls || "pdc-thumb", loading: "lazy",
+        src: `/scene/${id}/screenshot`, alt: (meta && meta.title) || `Scene ${id}` }));
+
+  const titleLink = (id, meta) =>
+    e("a", { href: `/scenes/${id}`, target: "_blank", rel: "noreferrer",
+      className: "pdc-title", title: (meta && (meta.title || meta.path)) || `Scene ${id}` },
+      (meta && (meta.title || basename(meta.path))) || `Scene ${id}`);
+
+  // ----- one matched clip row (a cluster member) -------------------------- //
+  const MemberRow = ({ m, checked, onToggle }) => {
+    const lv = LEVELS[m.level] || { label: m.level || "?", variant: "secondary" };
+    const range = (m.runs && m.runs[0])
+      ? ` · ${fmtTime(m.runs[0].b_start)}–${fmtTime(m.runs[0].b_end)}`
+      : "";
+    return e("label", { className: "pdc-member" + (checked ? " pdc-sel" : "") },
+      e(Form.Check, { type: "checkbox", checked: checked, onChange: onToggle,
+        className: "pdc-check" }),
+      thumb(m.scene_id, m.meta, "pdc-thumb-sm"),
+      e("div", { className: "pdc-member-meta" },
+        e("div", { className: "pdc-member-top" },
+          e(Badge, { variant: lv.variant, bg: lv.variant }, lv.label),
+          e("span", { className: "pdc-conf" },
+            m.confidence != null ? `${Math.round(m.confidence * 100)}%` : ""),
+          m.meta && m.meta.duration
+            ? e("span", { className: "pdc-dur" }, fmtTime(m.meta.duration)) : null),
+        titleLink(m.scene_id, m.meta),
+        e("span", { className: "pdc-cov" },
+          m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% of this clip matched${range}` : "")));
   };
 
-  // ----- one matched-relationship card ------------------------------------- //
-  const GroupCard = ({ group, onApply }) => {
-    const lv = LEVELS[group.level] || { label: group.level, variant: "secondary" };
-    const a = group.scene_a_meta || {};
-    const b = group.scene_b_meta || {};
-    const [busy, setBusy] = React.useState(false);
-
-    const sceneTile = (id, meta, role) =>
-      React.createElement("div", { className: "pdc-scene" },
-        React.createElement("a", { href: `/scenes/${id}`, target: "_blank", rel: "noreferrer" },
-          React.createElement("img", {
-            className: "pdc-thumb", loading: "lazy",
-            src: `/scene/${id}/screenshot`, alt: meta.title || `Scene ${id}`,
-          })),
-        React.createElement("div", { className: "pdc-scene-meta" },
-          React.createElement("span", { className: "pdc-role" }, role),
-          React.createElement("a", { href: `/scenes/${id}`, target: "_blank", rel: "noreferrer",
-            className: "pdc-title", title: meta.title || meta.path },
-            meta.title || (meta.path || "").split(/[\\/]/).pop() || `Scene ${id}`),
-          React.createElement("span", { className: "pdc-dur" },
-            meta.duration ? fmtTime(meta.duration) : "")));
-
-    const ranges = (group.runs || []).slice(0, 12).map((r, i) =>
-      React.createElement("li", { key: i, className: "pdc-range" },
-        React.createElement("span", { className: "pdc-range-b" }, `${fmtTime(r.b_start)}–${fmtTime(r.b_end)}`),
-        React.createElement("span", { className: "pdc-range-arrow" }, " ↔ "),
-        React.createElement("span", { className: "pdc-range-a" }, `${fmtTime(r.a_start)}–${fmtTime(r.a_end)}`)));
-
-    const apply = async () => {
-      setBusy(true);
-      try { await onApply(group); } finally { setBusy(false); }
-    };
-
-    return React.createElement("div", { className: `pdc-card pdc-${group.level}` },
-      React.createElement("div", { className: "pdc-card-head" },
-        React.createElement(Badge, { variant: lv.variant, bg: lv.variant }, lv.label),
-        React.createElement("span", { className: "pdc-conf" }, `confidence ${(group.confidence * 100).toFixed(0)}%`),
-        group.applied ? React.createElement(Badge, { variant: "success", bg: "success" }, "tagged") : null),
-      React.createElement("div", { className: "pdc-scenes" },
-        sceneTile(group.scene_a, a, "Longer / contains"),
-        React.createElement("div", { className: "pdc-vs" }, "▶"),
-        sceneTile(group.scene_b, b, "Shorter / clip")),
-      React.createElement("div", { className: "pdc-detail" },
-        React.createElement("div", { className: "pdc-cov" },
-          `B covered ${(group.coverage_b * 100).toFixed(0)}% · A covered ${(group.coverage_a * 100).toFixed(0)}%`),
-        ranges.length
-          ? React.createElement("ul", { className: "pdc-ranges" }, ranges)
-          : null),
-      React.createElement("div", { className: "pdc-actions" },
-        React.createElement(Button, {
-          size: "sm", variant: "secondary", disabled: busy || group.applied,
-          onClick: apply, title: "Add tags + scene markers for this match (opt-in)",
-        }, busy ? "Applying…" : group.applied ? "Tagged" : "Tag + mark"),
-        React.createElement(Button, {
-          size: "sm", variant: "outline-secondary",
-          onClick: () => window.open(`/scenes/${group.scene_b}`, "_blank"),
-        }, "Open clip")));
+  // ----- one cluster box (parent = longest video + its clips) ------------- //
+  const ClusterCard = ({ cluster, selected, onToggle, onSelectAllClips }) => {
+    const p = cluster.parent || {};
+    const pm = p.meta || {};
+    const allSel = cluster.members.length > 0 &&
+      cluster.members.every((m) => selected.has(m.scene_id));
+    return e("div", { className: "pdc-cluster" },
+      e("div", { className: "pdc-parent" },
+        thumb(p.scene_id, pm, "pdc-thumb"),
+        e("div", { className: "pdc-parent-meta" },
+          e("span", { className: "pdc-keep" }, "KEEP · longest"),
+          titleLink(p.scene_id, pm),
+          e("span", { className: "pdc-dur" }, pm.duration ? fmtTime(pm.duration) : "")),
+        e("div", { className: "pdc-cluster-actions" },
+          e("span", { className: "pdc-count" },
+            `${cluster.members.length} match${cluster.members.length === 1 ? "" : "es"}`),
+          e(Form.Check, { type: "checkbox", checked: allSel, label: "select all",
+            onChange: () => onSelectAllClips(cluster, !allSel) }))),
+      e("div", { className: "pdc-members" },
+        cluster.members.map((m) =>
+          e(MemberRow, { key: m.scene_id, m: m, checked: selected.has(m.scene_id),
+            onToggle: () => onToggle(m.scene_id) }))));
   };
 
-  // ----- main page --------------------------------------------------------- //
+  // ----- main page -------------------------------------------------------- //
   const PartialDupPage = () => {
     const client = useApolloClient();
-    const [groups, setGroups] = React.useState([]);
+    const [clusters, setClusters] = React.useState([]);
+    const [selected, setSelected] = React.useState(() => new Set());
     const [status, setStatus] = React.useState(null);
     const [tab, setTab] = React.useState("ALL");
     const [err, setErr] = React.useState(null);
+    const [busy, setBusy] = React.useState(false);
     const aliveRef = React.useRef(true);
 
     const run = React.useCallback(async (action, extra) => {
@@ -123,13 +124,11 @@
       return resp && resp.data && resp.data.runPluginOperation;
     }, [client]);
 
-    const loadResults = React.useCallback(async () => {
+    const loadClusters = React.useCallback(async () => {
       try {
-        const r = await run("results", { limit: 1000 });
-        if (aliveRef.current) setGroups((r && r.groups) || []);
-      } catch (e) {
-        if (aliveRef.current) setErr(e.message || String(e));
-      }
+        const r = await run("clusters");
+        if (aliveRef.current) setClusters((r && r.clusters) || []);
+      } catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run]);
 
     React.useEffect(() => {
@@ -141,124 +140,153 @@
           const s = await run("scan_status");
           if (!aliveRef.current) return;
           setStatus(s);
-          if (prevRunning && !(s && s.running)) await loadResults();
+          if (prevRunning && !(s && s.running)) await loadClusters();
           prevRunning = !!(s && s.running);
-        } catch (e) { /* transient */ }
-        if (aliveRef.current) setTimeout(poll, 2500);
+        } catch (ex) { /* transient */ }
+        if (aliveRef.current) setTimeout(poll, 3000);
       };
-      loadResults();
+      loadClusters();
       poll();
       return () => { aliveRef.current = false; };
-    }, [run, loadResults]);
+    }, [run, loadClusters]);
 
     const startScan = async () => {
       setErr(null);
       try { await run("scan"); setTimeout(() => run("scan_status").then(setStatus), 400); }
-      catch (e) { setErr(e.message || String(e)); }
+      catch (ex) { setErr(ex.message || String(ex)); }
     };
-
     const resetScan = async () => {
       setErr(null);
-      try { await run("reset"); const s = await run("scan_status"); setStatus(s); }
-      catch (e) { setErr(e.message || String(e)); }
+      try { await run("reset"); setStatus(await run("scan_status")); }
+      catch (ex) { setErr(ex.message || String(ex)); }
     };
 
-    const applyGroup = async (group) => {
+    const toggle = (id) => setSelected((prev) => {
+      const n = new Set(prev);
+      n.has(id) ? n.delete(id) : n.add(id);
+      return n;
+    });
+    const selectAllClips = (cluster, on) => setSelected((prev) => {
+      const n = new Set(prev);
+      cluster.members.forEach((m) => on ? n.add(m.scene_id) : n.delete(m.scene_id));
+      return n;
+    });
+
+    const deleteSelected = async () => {
+      const ids = Array.from(selected);
+      if (!ids.length) return;
+      if (!window.confirm(
+        `Delete ${ids.length} selected scene(s) AND their files from disk?\n` +
+        `The longest video in each box is kept. This cannot be undone.`)) return;
+      setBusy(true); setErr(null);
       try {
-        await run("apply", { group_id: group.group_id });
-        setGroups((gs) => gs.map((g) => g.group_id === group.group_id ? Object.assign({}, g, { applied: 1 }) : g));
-      } catch (e) { setErr(e.message || String(e)); }
+        const r = await run("delete_scenes", { scene_ids: ids, delete_file: true });
+        const gone = new Set((r && r.deleted) || []);
+        // drop deleted members; drop clusters left with no members
+        setClusters((cs) => cs
+          .map((c) => Object.assign({}, c, {
+            members: c.members.filter((m) => !gone.has(m.scene_id)),
+          }))
+          .map((c) => Object.assign({}, c, { size: c.members.length }))
+          .filter((c) => c.members.length > 0));
+        setSelected(new Set());
+        if (r && r.failed && r.failed.length) {
+          setErr(`${r.failed.length} deletion(s) failed (see plugin log).`);
+        }
+      } catch (ex) { setErr(ex.message || String(ex)); }
+      finally { setBusy(false); }
     };
 
-    const counts = groups.reduce((acc, g) => { acc[g.level] = (acc[g.level] || 0) + 1; return acc; }, {});
-    const shown = tab === "ALL" ? groups : groups.filter((g) => g.level === tab);
+    // filter clusters by tab (those containing a member of the level)
+    const shown = tab === "ALL"
+      ? clusters
+      : clusters.filter((c) => c.members.some((m) => m.level === tab));
     const running = status && status.running;
+    const totalMatches = clusters.reduce((a, c) => a + c.members.length, 0);
 
-    const tabBtn = (key, label) =>
-      React.createElement(Button, {
-        key, size: "sm",
-        variant: tab === key ? "primary" : "outline-secondary",
-        className: "pdc-tab", onClick: () => setTab(key),
-      }, `${label}${key === "ALL" ? ` (${groups.length})` : counts[key] ? ` (${counts[key]})` : ""}`);
+    const tabBtn = (key, label) => e(Button, {
+      key, size: "sm", variant: tab === key ? "primary" : "outline-secondary",
+      className: "pdc-tab", onClick: () => setTab(key),
+    }, label);
 
-    return React.createElement("div", { className: "pdc-page" },
-      React.createElement("div", { className: "pdc-header" },
-        React.createElement("h3", null, "Partial Duplicate Checker"),
-        React.createElement("p", { className: "pdc-sub" },
-          "Finds cuts, parts and montages that Stash's built-in duplicate checker can't — it compares whole-file hashes only. ",
-          React.createElement("a", { href: NATIVE_ROUTE }, "Open the built-in checker →"))),
-      React.createElement("div", { className: "pdc-toolbar" },
-        React.createElement(Button, { variant: "primary", disabled: running, onClick: startScan },
+    const progress = running
+      ? e("span", { className: "pdc-status" },
+          e(Spinner, { animation: "border", size: "sm" }),
+          ` ${status.phase || ""} ` +
+          (status.phase === "matching" && status.pairs_total
+            ? `${status.pairs_done || 0}/${status.pairs_total}`
+            : `${status.scenes_done || 0}/${status.scenes_total || 0}`))
+      : status && status.phase === "done"
+        ? e("span", { className: "pdc-status" },
+            `${status.groups || 0} matches across ${clusters.length} group(s)`)
+        : null;
+
+    return e("div", { className: "pdc-page" },
+      e("div", { className: "pdc-header" },
+        e("h3", null, "Partial Duplicate Checker"),
+        e("p", { className: "pdc-sub" },
+          "Cuts, parts and montages Stash's built-in checker can't see. Each box is a ",
+          "video and the shorter clips/dups taken from it — keep the long one, delete the rest. ",
+          e("a", { href: NATIVE_ROUTE }, "Built-in checker →"))),
+      e("div", { className: "pdc-toolbar" },
+        e(Button, { variant: "primary", disabled: running, onClick: startScan },
           running ? "Scanning…" : "Scan library"),
-        running
-          ? React.createElement("span", { className: "pdc-status" },
-              React.createElement(Spinner, { animation: "border", size: "sm" }),
-              ` ${status.phase || ""} ${status.scenes_done || 0}/${status.scenes_total || 0}`
-              + (status.errors ? ` · ${status.errors} errors` : ""))
-          : status && status.phase === "done"
-            ? React.createElement("span", { className: "pdc-status" },
-                `Last scan: ${status.scenes_done || 0} scenes, ${status.groups || groups.length} groups`)
-            : null,
+        progress,
         (status && status.running && status.worker_alive === false)
-          ? React.createElement(Button, {
-              size: "sm", variant: "warning", onClick: resetScan,
-              title: "The scan worker is no longer running — clear the stuck status",
-            }, "Reset stuck scan")
-          : null),
-      err ? React.createElement("div", { className: "pdc-error" }, `Error: ${err}`) : null,
-      React.createElement("div", { className: "pdc-tabs" },
-        tabBtn("ALL", "All"), tabBtn("DUPLICATE", "Duplicate"),
-        tabBtn("PART", "Part"), tabBtn("CUT", "Cut / Montage")),
+          ? e(Button, { size: "sm", variant: "warning", onClick: resetScan },
+              "Reset stuck scan") : null),
+      err ? e("div", { className: "pdc-error" }, `Error: ${err}`) : null,
+      e("div", { className: "pdc-tabs" },
+        tabBtn("ALL", `All (${totalMatches})`), tabBtn("DUPLICATE", "Duplicate"),
+        tabBtn("PART", "Part"), tabBtn("CUT", "Cut/Montage")),
+      // sticky delete bar
+      selected.size > 0
+        ? e("div", { className: "pdc-delbar" },
+            e("span", null, `${selected.size} selected`),
+            e(Button, { variant: "danger", size: "sm", disabled: busy, onClick: deleteSelected },
+              busy ? "Deleting…" : `Delete ${selected.size} file(s)`),
+            e(Button, { variant: "outline-secondary", size: "sm", disabled: busy,
+              onClick: () => setSelected(new Set()) }, "Clear"))
+        : null,
       shown.length === 0
-        ? React.createElement("div", { className: "pdc-empty" },
+        ? e("div", { className: "pdc-empty" },
             running ? "Scanning…"
-              : groups.length === 0 ? "No partial duplicates found yet. Run a scan."
+              : clusters.length === 0 ? "No partial duplicates found yet. Run a scan."
                 : "Nothing in this tab.")
-        : React.createElement("div", { className: "pdc-cards" },
-            shown.map((g) => React.createElement(GroupCard, { key: g.group_id, group: g, onApply: applyGroup }))));
+        : e("div", { className: "pdc-clusters" },
+            shown.map((c) => e(ClusterCard, {
+              key: c.parent.scene_id, cluster: c, selected: selected,
+              onToggle: toggle, onSelectAllClips: selectAllClips }))));
   };
 
-  // ----- nav button -------------------------------------------------------- //
+  // ----- nav entries ------------------------------------------------------ //
   const NavButton = () =>
-    React.createElement(Button, {
-      className: "nav-utility minimal", title: "Partial Duplicate Checker",
-      variant: "secondary", onClick: () => navigateTo(ROUTE),
-    }, React.createElement(Icon, { icon: FA.faClone }));
+    e(Button, { className: "nav-utility minimal", title: "Partial Duplicate Checker",
+      variant: "secondary", onClick: () => navigateTo(ROUTE) },
+      e(Icon, { icon: FA.faClone }));
 
-  // ----- registration ------------------------------------------------------ //
   try {
     api.register.route(ROUTE, PartialDupPage);
-  } catch (e) { console.error(`${LOG} register.route failed`, e); }
+  } catch (ex) { console.error(`${LOG} register.route failed`, ex); }
 
   try {
     api.patch.before("MainNavBar.UtilityItems", function (props) {
-      return [{
-        children: React.createElement(React.Fragment, null, props.children,
-          React.createElement(NavButton, null)),
-      }];
+      return [{ children: e(React.Fragment, null, props.children, e(NavButton, null)) }];
     });
-  } catch (e) { console.error(`${LOG} navbar patch failed`, e); }
+  } catch (ex) { console.error(`${LOG} navbar patch failed`, ex); }
 
-  // Stash v0.31.1 exposes only 4 patchable components (Icon, LoadingIndicator,
-  // MainNavBar.MenuItems, MainNavBar.UtilityItems). The Settings▸Tools page and
-  // the built-in Duplicate Checker page are NOT patchable, so we can't graft a tab
-  // there — the most integrated available entry is a first-class main-nav menu item.
+  // Stash v0.31.1 exposes only 4 patchable components — a first-class main-nav
+  // menu item is the most integrated entry available (Settings▸Tools and the
+  // built-in duplicate-checker page are not patchable).
   try {
     api.patch.before("MainNavBar.MenuItems", function (props) {
-      const link = React.createElement(
-        "div",
-        {
-          key: "pdc-menu", className: "nav-link pdc-menu-link", role: "button",
-          onClick: () => navigateTo(ROUTE), title: "Partial Duplicate Checker",
-        },
-        React.createElement(Icon, { icon: FA.faClone }),
-        React.createElement("span", { className: "pdc-menu-label" }, "Partial Dup")
-      );
-      return [{
-        children: React.createElement(React.Fragment, null, props.children, link),
-      }];
+      const link = e("div", {
+        key: "pdc-menu", className: "nav-link pdc-menu-link", role: "button",
+        onClick: () => navigateTo(ROUTE), title: "Partial Duplicate Checker",
+      }, e(Icon, { icon: FA.faClone }), e("span", { className: "pdc-menu-label" }, "Partial Dup"));
+      return [{ children: e(React.Fragment, null, props.children, link) }];
     });
-  } catch (e) { console.error(`${LOG} menu patch failed`, e); }
+  } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
   console.log(`${LOG} plugin loaded (v0.1.0)`);
 })();

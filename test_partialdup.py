@@ -447,5 +447,70 @@ class MatchScaleTests(unittest.TestCase):
         self.assertLessEqual(len(pairs), 8 * 3)
 
 
+class ClusterTests(unittest.TestCase):
+    def setUp(self):
+        if os.path.exists(_TMP_DB):
+            os.remove(_TMP_DB)
+        self.conn = partialdup._connect()
+        for sid, dur in [(100, 1200), (50, 600), (30, 180), (20, 90)]:
+            self.conn.execute(
+                "INSERT INTO scenes (scene_id,file_hash,title,path,duration,n_segments,"
+                "mode,indexed_at) VALUES (?,?,?,?,?,?,?,0)",
+                (sid, f"h{sid}", f"scene{sid}", f"/x/{sid}.mp4", dur, 10, "fast"))
+
+        def g(a, b, level, conf):
+            self.conn.execute(
+                "INSERT INTO groups (level,scene_a,scene_b,confidence,coverage_a,"
+                "coverage_b,runs_json,applied,created_at) VALUES (?,?,?,?,?,?,?,0,0)",
+                (level, a, b, conf, 0.3, 1.0, "[]"))
+
+        g(100, 50, "PART", 0.95)   # 100 contains 50
+        g(100, 30, "PART", 0.90)   # 100 contains 30
+        g(50, 20, "CUT", 0.70)     # 50 contains 20 (joins cluster transitively)
+        self.conn.commit()
+
+    def tearDown(self):
+        self.conn.close()
+        partialdup._SERVER_CONNECTION = None
+
+    def test_cluster_parent_is_largest(self):
+        cl = partialdup._clusters(self.conn)
+        self.assertEqual(len(cl), 1)
+        c = cl[0]
+        self.assertEqual(c["parent"]["scene_id"], 100)   # longest by duration
+        self.assertEqual(c["size"], 3)
+        self.assertEqual({m["scene_id"] for m in c["members"]}, {50, 30, 20})
+        lvl = {m["scene_id"]: m["level"] for m in c["members"]}
+        self.assertEqual(lvl[20], "CUT")   # via its (50,20) edge
+
+    def test_delete_scenes_purges_index(self):
+        partialdup._SERVER_CONNECTION = {"Scheme": "http", "Port": 9999,
+                                         "SessionCookie": {"Name": "s", "Value": "v"}}
+        seen = []
+
+        def fake(sc, q, v=None):
+            seen.append(v["i"]["id"])
+            return {"sceneDestroy": True}
+
+        with patch.object(partialdup, "_gql_data", fake):
+            res = partialdup.action_delete_scenes({"scene_ids": [30, 20], "delete_file": True})
+        self.assertEqual(set(res["deleted"]), {30, 20})
+        self.assertEqual(res["failed"], [])
+        self.assertEqual(set(seen), {"30", "20"})
+        c2 = partialdup._connect()
+        scenes = {r[0] for r in c2.execute("SELECT scene_id FROM scenes")}
+        ngroups = c2.execute("SELECT COUNT(*) FROM groups").fetchone()[0]
+        c2.close()
+        self.assertEqual(scenes, {100, 50})          # 30, 20 purged
+        self.assertEqual(ngroups, 1)                 # only (100,50) survives
+
+    def test_delete_scenes_requires_ids(self):
+        partialdup._SERVER_CONNECTION = {"Port": 9999}
+        res = _run_main({"action": "delete_scenes", "scene_ids": []},
+                        server_connection=partialdup._SERVER_CONNECTION)
+        self.assertIsNotNone(res["error"])
+        self.assertIn("scene_ids", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

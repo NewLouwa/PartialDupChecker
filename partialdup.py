@@ -940,6 +940,79 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
     return len(results)
 
 
+def _clusters(conn):
+    """Group the pairwise matches into clusters keyed by the LARGEST video.
+
+    Pairwise groups form a graph (longer↔shorter). We take connected components;
+    in each, the parent = the longest scene (by duration), and every other scene
+    is a 'member' clip shown under it with its relationship level — so one box
+    shows a long video and all the cuts/parts/dups of it. Returns clusters sorted
+    by member count.
+    """
+    from collections import defaultdict
+
+    rows = [dict(r) for r in conn.execute(
+        "SELECT level, scene_a, scene_b, confidence, coverage_b, runs_json FROM groups")]
+    if not rows:
+        return []
+
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:  # path compression
+            parent[x], x = root, parent[x]
+        return root
+
+    def union(a, b):
+        parent[find(a)] = find(b)
+
+    edge_by_pair, strongest = {}, {}
+    for r in rows:
+        union(r["scene_a"], r["scene_b"])
+        edge_by_pair[(r["scene_a"], r["scene_b"])] = r
+        for sid in (r["scene_a"], r["scene_b"]):
+            if sid not in strongest or r["confidence"] > strongest[sid]["confidence"]:
+                strongest[sid] = r
+
+    meta = {r["scene_id"]: dict(r) for r in conn.execute(
+        "SELECT scene_id, title, path, duration FROM scenes")}
+
+    comps = defaultdict(set)
+    for r in rows:
+        comps[find(r["scene_a"])].add(r["scene_a"])
+        comps[find(r["scene_a"])].add(r["scene_b"])
+
+    order = {"DUPLICATE": 0, "PART": 1, "CUT": 2}
+    clusters = []
+    for members in comps.values():
+        parent_sid = max(members, key=lambda s: (meta.get(s, {}).get("duration") or 0, s))
+        kids = []
+        for s in members:
+            if s == parent_sid:
+                continue
+            edge = edge_by_pair.get((parent_sid, s)) or strongest.get(s)
+            kids.append({
+                "scene_id": s,
+                "meta": meta.get(s),
+                "level": edge["level"] if edge else None,
+                "confidence": edge["confidence"] if edge else None,
+                "coverage_b": edge["coverage_b"] if edge else None,
+                "runs": json.loads(edge["runs_json"] or "[]") if edge else [],
+            })
+        kids.sort(key=lambda c: (order.get(c["level"], 3), -(c["confidence"] or 0)))
+        clusters.append({
+            "parent": {"scene_id": parent_sid, "meta": meta.get(parent_sid)},
+            "members": kids,
+            "size": len(kids),
+        })
+    clusters.sort(key=lambda c: -c["size"])
+    return clusters
+
+
 # --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
@@ -1098,6 +1171,59 @@ def action_results(args):
         return {"total": total, "limit": limit, "offset": offset, "groups": groups}
     finally:
         conn.close()
+
+
+def action_clusters(args):
+    """Return matches clustered under the largest video (parent) of each group."""
+    conn = _connect()
+    try:
+        clusters = _clusters(conn)
+        return {"count": len(clusters), "clusters": clusters}
+    finally:
+        conn.close()
+
+
+def action_delete_scenes(args):
+    """Delete the given scenes from Stash (optionally their files), then purge
+    them from the index so clusters refresh without a re-scan. DESTRUCTIVE —
+    only ever invoked from the UI's explicit, confirmed selection."""
+    ids = args.get("scene_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise PdcError("scene_ids (non-empty list) required")
+    delete_file = bool(args.get("delete_file", True))
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    sc = _SERVER_CONNECTION
+
+    deleted, failed = [], []
+    for sid in ids:
+        try:
+            _gql_data(
+                sc,
+                "mutation($i:SceneDestroyInput!){sceneDestroy(input:$i)}",
+                {"i": {"id": str(sid), "delete_file": delete_file,
+                       "delete_generated": True}},
+            )
+            deleted.append(int(sid))
+        except Exception as e:
+            failed.append({"scene_id": sid, "error": str(e)})
+
+    if deleted:
+        conn = _connect()
+        try:
+            q = ",".join("?" * len(deleted))
+            with conn:
+                conn.execute(f"DELETE FROM scenes WHERE scene_id IN ({q})", deleted)
+                conn.execute(f"DELETE FROM segments WHERE scene_id IN ({q})", deleted)
+                conn.execute(f"DELETE FROM hash_bands WHERE scene_id IN ({q})", deleted)
+                conn.execute(
+                    f"DELETE FROM groups WHERE scene_a IN ({q}) OR scene_b IN ({q})",
+                    deleted + deleted,
+                )
+        finally:
+            conn.close()
+    _log(f"delete_scenes: deleted {len(deleted)}, failed {len(failed)}, files={delete_file}")
+    return {"deleted": deleted, "failed": failed, "delete_file": delete_file}
 
 
 # --- opt-in write-back (never automatic; only on explicit user action) ------ #
@@ -1335,6 +1461,8 @@ ACTIONS = {
     "scan": action_scan,
     "scan_status": action_scan_status,
     "results": action_results,
+    "clusters": action_clusters,
+    "delete_scenes": action_delete_scenes,
     "apply": action_apply,
     "reset": action_reset,
 }
