@@ -198,6 +198,7 @@ DEFAULT_CONFIG = {
     "max_candidate_pairs": 200000,  # hard cap on total candidate pairs (logged if hit)
     "max_deep_scenes": 300,      # hybrid: max distinct scenes to deep-fingerprint (ffmpeg budget)
     "max_deep_pairs": 3000,      # hybrid: max cross-space pairs to deep-confirm
+    "max_deep_seconds": 900,     # hybrid: wall-clock cap on deep-confirm (guarantees the scan finishes)
     "dup_min_coverage": 0.95,    # DUPLICATE: coverage both ways
     "part_min_coverage": 0.90,   # PART: longest contiguous run as a fraction of the shorter
     "cut_min_coverage": 0.55,    # CUT/MONTAGE: total coverage of the shorter clip
@@ -896,13 +897,25 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
         _set_status(conn, phase="confirming")
         deep_cache = {}
         max_deep = cfg["max_deep_scenes"]
+        budget_s = cfg["max_deep_seconds"]
+        t0 = time.time()
+        # Strongest hits first so the (bounded) ffmpeg budget refines the most
+        # confident matches; cross-space candidates after, capped.
+        ordered = [(lo, hi) for lo, hi, _ in
+                   sorted(hits, key=lambda x: -x[2]["confidence"])]
         dropped = max(0, len(cross) - cfg["max_deep_pairs"])
-        todo = [(lo, hi) for lo, hi, _ in hits] + cross[: cfg["max_deep_pairs"]]
-        for j, (lo, hi) in enumerate(todo):
-            # Respect the ffmpeg budget: skip pairs needing a not-yet-decoded
-            # scene once the distinct-scene cap is reached (keep any fast result).
+        todo = ordered + cross[: cfg["max_deep_pairs"]]
+        confirmed = 0
+        stopped = None
+        for lo, hi in todo:
+            if time.time() - t0 > budget_s:   # wall-clock cap → guarantees finishing
+                stopped = "time-budget"
+                break
+            # ffmpeg scene budget: skip pairs needing a not-yet-decoded scene
+            # once the distinct-scene cap is reached (keep the fast result).
             if (len(deep_cache) >= max_deep
                     and lo not in deep_cache and hi not in deep_cache):
+                stopped = "scene-budget"
                 continue
             dlo = _deep_segments(conn, lo, cfg, ffmpeg, deep_cache)
             dhi = _deep_segments(conn, hi, cfg, ffmpeg, deep_cache)
@@ -912,11 +925,13 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
                     results[(lo, hi)] = r
                 else:
                     results.pop((lo, hi), None)  # deep ran, no match → drop
-            if (j + 1) % 20 == 0:
-                _set_status(conn, confirmed=j + 1, deep_scenes=len(deep_cache))
-        if dropped:
-            _log(f"cross-space deep-confirm capped: {dropped} pairs skipped "
-                 f"(raise max_deep_pairs)")
+            confirmed += 1
+            if confirmed % 10 == 0:
+                _set_status(conn, confirmed=confirmed, deep_scenes=len(deep_cache))
+        if stopped or dropped:
+            _log(f"deep-confirm bounded: confirmed={confirmed}, "
+                 f"deep_scenes={len(deep_cache)}, stopped={stopped}, "
+                 f"cross_dropped={dropped} (rest keep fast/sprite classification)")
 
     for (lo, hi), res in results.items():
         _persist_group(conn, lo, hi, res)
