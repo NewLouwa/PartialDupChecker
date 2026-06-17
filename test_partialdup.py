@@ -379,5 +379,73 @@ class ApplyTests(unittest.TestCase):
         self.assertIn("not found", res["error"])
 
 
+class MatchScaleTests(unittest.TestCase):
+    """Lock in the scaling fix: hybrid deep-confirms only the actual hits, not
+    every candidate pair (the bug that made large scans never finish)."""
+
+    def setUp(self):
+        if os.path.exists(_TMP_DB):
+            os.remove(_TMP_DB)
+        self.vocab = _mkframes(100, seed=7)
+
+    def _insert(self, conn, sid, frames, mode="fast"):
+        conn.execute(
+            "INSERT OR REPLACE INTO scenes (scene_id,file_hash,title,path,duration,"
+            "n_segments,mode,indexed_at) VALUES (?,?,?,?,?,?,?,0)",
+            (sid, f"h{sid}|{mode}", f"s{sid}", f"/x/{sid}.mp4",
+             len(frames) * 2, len(frames), mode))
+        for idx, h in enumerate(frames):
+            conn.execute("INSERT OR REPLACE INTO segments VALUES (?,?,?,?)",
+                         (sid, idx, idx * 2.0, partialdup._u2s(h)))
+        conn.commit()
+
+    def test_deep_confirm_only_hits(self):
+        v = self.vocab
+        conn = partialdup._connect()
+        self._insert(conn, 1, v[0:20])                          # long
+        self._insert(conn, 2, v[5:15])                          # contiguous chunk → HIT
+        self._insert(conn, 3, [v[0], v[3], v[6], v[9], v[12]])  # scattered → candidate, not a hit
+        conn.close()
+
+        cfg = dict(partialdup.DEFAULT_CONFIG)
+        cfg["mode"] = "hybrid"
+        segmap = {1: _segs(v[0:20]), 2: _segs(v[5:15]),
+                  3: _segs([v[0], v[3], v[6], v[9], v[12]])}
+        seen = []
+
+        def fake_deep(conn, sid, cfg, ffmpeg, cache):
+            seen.append(sid)
+            return segmap[sid]
+
+        conn = partialdup._connect()
+        with patch.object(partialdup, "_deep_segments", fake_deep):
+            partialdup._match_and_classify(conn, cfg, None, ffmpeg="x")
+        rows = conn.execute("SELECT scene_a, scene_b, level FROM groups").fetchall()
+        conn.close()
+
+        self.assertTrue(any({r[0], r[1]} == {1, 2} for r in rows), "1↔2 should be a group")
+        # The crux: scene 3 (a non-hit candidate) must NOT be deep-fingerprinted.
+        self.assertEqual(set(seen), {1, 2},
+                         f"deep-confirmed {set(seen)}; expected only the hit's scenes {{1,2}}")
+
+    def test_candidate_fanout_cap(self):
+        # Each scene shares many segments with every other → without the top-K cap
+        # this is a clique (n*(n-1)/2 pairs). Cap keeps it bounded.
+        v = self.vocab
+        conn = partialdup._connect()
+        shared = v[0:10]
+        for sid in range(1, 9):  # 8 scenes all sharing the same 10 frames
+            self._insert(conn, sid, shared + _mkframes(5, seed=sid))
+        seg_by_scene = partialdup._load_segments(conn)
+        conn.close()
+        cfg = dict(partialdup.DEFAULT_CONFIG)
+        cfg["top_k_candidates"] = 3
+        pairs = partialdup._candidate_pairs(seg_by_scene, cfg)
+        # With K=3, each of 8 scenes keeps ≤3 partners → far fewer than the 28 clique pairs.
+        for (lo, hi) in pairs:
+            self.assertNotEqual(lo, hi)
+        self.assertLessEqual(len(pairs), 8 * 3)
+
+
 if __name__ == "__main__":
     unittest.main()

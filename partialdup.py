@@ -190,10 +190,14 @@ DEFAULT_CONFIG = {
     "deep_interval_s": 2.0,      # ffmpeg deep-pass sampling cadence (seconds)
     "segment_hamming": 8,        # max per-segment Hamming distance for a match
     "band_count": 4,             # LSH bands (64 bits / 4 = 16-bit bands)
-    "min_candidate_segs": 3,     # scene pair shortlisted if it shares >= this many segments
+    "min_candidate_segs": 4,     # scene pair shortlisted if it shares >= this many segments
     "min_run_segs": 2,           # ignore matched runs shorter than this (noise)
     "gap_tol": 1,                # tolerate this many missing seeds inside a run
-    "max_bucket": 300,           # skip non-discriminative band buckets (blank frames)
+    "max_bucket": 200,           # skip non-discriminative band buckets (blank/common frames)
+    "top_k_candidates": 30,      # per-scene fanout cap (bounds the candidate set at scale)
+    "max_candidate_pairs": 200000,  # hard cap on total candidate pairs (logged if hit)
+    "max_deep_scenes": 300,      # hybrid: max distinct scenes to deep-fingerprint (ffmpeg budget)
+    "max_deep_pairs": 3000,      # hybrid: max cross-space pairs to deep-confirm
     "dup_min_coverage": 0.95,    # DUPLICATE: coverage both ways
     "part_min_coverage": 0.90,   # PART: longest contiguous run as a fraction of the shorter
     "cut_min_coverage": 0.55,    # CUT/MONTAGE: total coverage of the shorter clip
@@ -613,7 +617,32 @@ def _candidate_pairs(seg_by_scene, cfg):
                 else:
                     pair_hits[(sc, sa)].add(ic)
     floor = cfg["min_candidate_segs"]
-    return [pair for pair, hits in pair_hits.items() if len(hits) >= floor]
+    score = {p: len(h) for p, h in pair_hits.items() if len(h) >= floor}
+    if not score:
+        return []
+
+    # Bound the candidate set at scale (a large/repetitive library can otherwise
+    # produce hundreds of thousands of weak coincidental pairs). Keep, per scene,
+    # only its top-K partners by shared-segment count — real duplicates share many
+    # segments and survive; weak 1-bucket coincidences are dropped.
+    k = cfg["top_k_candidates"]
+    by_scene = defaultdict(list)
+    for (lo, hi), n in score.items():
+        by_scene[lo].append(((lo, hi), n))
+        by_scene[hi].append(((lo, hi), n))
+    keep = set()
+    for lst in by_scene.values():
+        lst.sort(key=lambda x: -x[1])
+        for pair, _n in lst[:k]:
+            keep.add(pair)
+
+    pairs = sorted(keep, key=lambda p: -score[p])  # strongest first
+    cap = cfg["max_candidate_pairs"]
+    if len(pairs) > cap:
+        _log(f"candidate pairs capped at {cap} (from {len(pairs)}) — raise "
+             f"max_candidate_pairs or min_candidate_segs to widen/narrow")
+        pairs = pairs[:cap]
+    return pairs
 
 
 def _align_hashes(A, B, cfg):
@@ -803,12 +832,27 @@ def _deep_segments(conn, sid, cfg, ffmpeg, cache):
     return segs
 
 
-def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
-    """Find candidate pairs, align + classify each, persist groups. Returns count.
+def _persist_group(conn, lo, hi, res):
+    scene_a, scene_b = (hi, lo) if res["swap"] else (lo, hi)
+    conn.execute(
+        "INSERT INTO groups (level, scene_a, scene_b, confidence, coverage_a, "
+        "coverage_b, runs_json, applied, created_at) VALUES (?,?,?,?,?,?,?,0,?)",
+        (res["level"], scene_a, scene_b, res["confidence"], res["coverage_a"],
+         res["coverage_b"], json.dumps(res["ranges"]), time.time()),
+    )
 
-    Hybrid mode: candidate pairs are shortlisted from the fast (sprite) index,
-    then each candidate scene is deep-fingerprinted (ffmpeg) on demand so the
-    alignment + classification use precise fine-grained timelines.
+
+def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
+    """Find candidate pairs, align + classify, persist groups. Returns count.
+
+    Scales to large libraries by NOT deep-decoding speculatively:
+      1. Shortlist candidate pairs (bounded — see _candidate_pairs).
+      2. Fast-classify every same-space pair on the (cheap, in-memory) index
+         timelines — no ffmpeg.
+      3. Hybrid only: deep-fingerprint just the *hits* (and a bounded set of
+         cross-space candidates) to refine ranges / reject sprite coincidences.
+    The old code deep-confirmed every candidate pair up front, which was O(pairs)
+    ffmpeg decodes — infeasible at thousands of scenes.
     """
     fast_segs = _load_segments(conn)
     conn.execute("DELETE FROM groups")
@@ -818,40 +862,67 @@ def _match_and_classify(conn, cfg, server_connection=None, ffmpeg=None):
 
     pairs = _candidate_pairs(fast_segs, cfg)
     hybrid = cfg.get("mode") == "hybrid" and bool(ffmpeg)
-    # Hash space per scene ('fast' sprite vs 'deep' ffmpeg). Sprite and ffmpeg
-    # pHashes aren't directly comparable; outside hybrid (which re-fingerprints
-    # both sides deep) we only compare scenes from the same space.
+    # Hash space per scene ('fast' sprite vs 'deep' ffmpeg) — not directly
+    # comparable, so same-space pairs are fast-classified; cross-space pairs are
+    # only resolvable by deep-confirm (hybrid).
     modes = {r["scene_id"]: r["mode"]
              for r in conn.execute("SELECT scene_id, mode FROM scenes")}
-    _log(f"matching: {len(fast_segs)} scenes, {len(pairs)} candidate pairs"
-         f"{' (deep-confirm)' if hybrid else ''}")
-    deep_cache = {}
-    count = skipped = 0
-    for lo, hi in pairs:
-        if not hybrid and modes.get(lo) != modes.get(hi):
-            skipped += 1
-            continue  # cross-space pair — not comparable without deep-confirm
-        segs_lo, segs_hi = fast_segs[lo], fast_segs[hi]
-        if hybrid:
+    total = len(pairs)
+    _set_status(conn, phase="matching", pairs_total=total, pairs_done=0)
+    _log(f"matching: {len(fast_segs)} scenes, {total} candidate pairs")
+
+    # Pass 1 — fast-classify (no ffmpeg).
+    hits = []   # [(lo, hi, fast_result)]
+    cross = []  # cross-space pairs deferred to deep-confirm (hybrid)
+    for i, (lo, hi) in enumerate(pairs):
+        if modes.get(lo) != modes.get(hi):
+            if hybrid:
+                cross.append((lo, hi))
+            continue
+        res = _match_pair(fast_segs[lo], fast_segs[hi], cfg)
+        if res:
+            hits.append((lo, hi, res))
+        if (i + 1) % 2000 == 0:
+            _set_status(conn, pairs_done=i + 1)
+    _set_status(conn, pairs_done=total)
+    _log(f"fast-classify: {len(hits)} hits, {len(cross)} cross-space deferred")
+
+    results = {(lo, hi): res for lo, hi, res in hits}  # default to fast result
+
+    # Pass 2 — hybrid deep-confirm (bounded ffmpeg). Refine hits to precise
+    # ranges and drop sprite-only coincidences; resolve a capped set of
+    # cross-space candidates.
+    if hybrid:
+        _set_status(conn, phase="confirming")
+        deep_cache = {}
+        max_deep = cfg["max_deep_scenes"]
+        dropped = max(0, len(cross) - cfg["max_deep_pairs"])
+        todo = [(lo, hi) for lo, hi, _ in hits] + cross[: cfg["max_deep_pairs"]]
+        for j, (lo, hi) in enumerate(todo):
+            # Respect the ffmpeg budget: skip pairs needing a not-yet-decoded
+            # scene once the distinct-scene cap is reached (keep any fast result).
+            if (len(deep_cache) >= max_deep
+                    and lo not in deep_cache and hi not in deep_cache):
+                continue
             dlo = _deep_segments(conn, lo, cfg, ffmpeg, deep_cache)
             dhi = _deep_segments(conn, hi, cfg, ffmpeg, deep_cache)
             if dlo and dhi:
-                segs_lo, segs_hi = dlo, dhi
-        res = _match_pair(segs_lo, segs_hi, cfg)
-        if not res:
-            continue
-        # res['swap']=False → A(longer)=lo; True → A(longer)=hi.
-        scene_a, scene_b = (hi, lo) if res["swap"] else (lo, hi)
-        conn.execute(
-            "INSERT INTO groups (level, scene_a, scene_b, confidence, coverage_a, "
-            "coverage_b, runs_json, applied, created_at) VALUES (?,?,?,?,?,?,?,0,?)",
-            (res["level"], scene_a, scene_b, res["confidence"], res["coverage_a"],
-             res["coverage_b"], json.dumps(res["ranges"]), time.time()),
-        )
-        count += 1
+                r = _match_pair(dlo, dhi, cfg)
+                if r:
+                    results[(lo, hi)] = r
+                else:
+                    results.pop((lo, hi), None)  # deep ran, no match → drop
+            if (j + 1) % 20 == 0:
+                _set_status(conn, confirmed=j + 1, deep_scenes=len(deep_cache))
+        if dropped:
+            _log(f"cross-space deep-confirm capped: {dropped} pairs skipped "
+                 f"(raise max_deep_pairs)")
+
+    for (lo, hi), res in results.items():
+        _persist_group(conn, lo, hi, res)
     conn.commit()
-    _log(f"matching: {count} groups ({skipped} cross-space pairs skipped)")
-    return count
+    _log(f"matching: {len(results)} groups")
+    return len(results)
 
 
 # --------------------------------------------------------------------------- #
