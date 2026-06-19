@@ -512,5 +512,52 @@ class ClusterTests(unittest.TestCase):
         self.assertIn("scene_ids", res["error"])
 
 
+class ImageScanTests(unittest.TestCase):
+    def test_hex_phash(self):
+        self.assertEqual(partialdup._hex_phash("fefeca80808d2d2d"), 0xFEFECA80808D2D2D)
+        self.assertIsNone(partialdup._hex_phash(None))
+        self.assertIsNone(partialdup._hex_phash("nothex"))
+
+    def test_popcount(self):
+        import numpy as np
+        out = partialdup._popcount64(np.array([0x0, 0xFF, 0xFFFFFFFFFFFFFFFF], dtype=np.uint64))
+        self.assertEqual(list(int(x) for x in out), [0, 8, 64])
+
+    def test_image_edges_bands(self):
+        cfg = dict(partialdup.DEFAULT_CONFIG)
+        cfg["image_dup_hamming"] = 4
+        cfg["image_neighbour_hamming"] = 10
+        imgs = [
+            {"phash": 0x0},          # 0  A
+            {"phash": 0x0},          # 1  B  (dup of A, d=0)
+            {"phash": 0xFF},         # 2  C  (d(A)=8 -> neighbour)
+            {"phash": 0x0F},         # 3  E  (d(A)=4 dup; d(C)=4 dup)
+            {"phash": 0xFFFFFFFFFFFFFFFF},  # 4  D (far)
+        ]
+        dup, nb = partialdup._image_edges(imgs, cfg)
+        self.assertTrue(all(d <= 4 for _a, _b, d in dup))
+        self.assertTrue(all(d <= 10 for _a, _b, d in nb))
+        self.assertGreaterEqual(len(nb), len(dup))
+        # similar cluster = {A,B,C,E}; D excluded
+        comps = partialdup._components(nb)
+        self.assertEqual(len(comps), 1)
+        self.assertEqual(comps[0], {0, 1, 2, 3})
+        self.assertNotIn(4, comps[0])
+
+    def test_scan_images_requires_server_connection(self):
+        partialdup._SERVER_CONNECTION = None
+        res = _run_main({"action": "scan_images"})
+        self.assertIsNotNone(res["error"])
+        self.assertIn("server_connection", res["error"])
+
+    def test_delete_images_requires_ids(self):
+        partialdup._SERVER_CONNECTION = {"Port": 9999}
+        res = _run_main({"action": "delete_images", "image_ids": []},
+                        server_connection=partialdup._SERVER_CONNECTION)
+        partialdup._SERVER_CONNECTION = None
+        self.assertIsNotNone(res["error"])
+        self.assertIn("image_ids", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()

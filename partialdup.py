@@ -169,6 +169,14 @@ CREATE TABLE IF NOT EXISTS hash_bands (
 );
 CREATE INDEX IF NOT EXISTS idx_band ON hash_bands (band_no, band_val);
 CREATE INDEX IF NOT EXISTS idx_band_scene ON hash_bands (scene_id);
+-- Image near-duplicate pairs (d <= image_dup_hamming), for keep-one-flag-rest.
+CREATE TABLE IF NOT EXISTS image_groups (
+    image_a    INTEGER,
+    image_b    INTEGER,
+    distance   INTEGER,
+    created_at REAL
+);
+CREATE INDEX IF NOT EXISTS idx_imgroups_a ON image_groups (image_a);
 -- Detected relationships (one group = one match between two scenes).
 CREATE TABLE IF NOT EXISTS groups (
     group_id    INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -208,6 +216,15 @@ DEFAULT_CONFIG = {
     "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
     "ffprobe_path": "",          # override; else PDC_FFPROBE env / PATH
     "ffmpeg_timeout_s": 600,     # hard cap per video decode (bounds a hung/bad file)
+    # --- images (use Stash's native per-image phash) ---
+    "image_dup_hamming": 4,      # d <= this  -> duplicate (keep one, flag rest)
+    "image_neighbour_hamming": 10,  # dup < d <= this -> "similar" -> gallery cluster
+    "image_min_cluster": 3,      # similar clusters smaller than this are ignored
+    "image_max_bucket": 800,     # skip non-discriminative phash band buckets
+    "gallery_prefix": "Similar images",  # gallery title prefix
+    "gallery_skip_in_gallery": True,     # only cluster images not already in a gallery (idempotent)
+    "gallery_dry_run": True,     # report planned galleries WITHOUT creating them (safety default)
+    "gallery_max_create": 200,   # cap galleries created per run
 }
 
 
@@ -302,16 +319,17 @@ def _pid_alive(pid):
         return False
 
 
-def _spawn_worker(server_connection):
+def _spawn_worker(server_connection, kind="video"):
     """Spawn a detached background process running the scan pipeline.
 
     Stash kills request-bound plugin subprocesses on client disconnect, so the
-    long-running scan must run in a process detached from the request.
+    long-running scan must run in a process detached from the request. `kind`
+    selects the video scan or the image scan.
     """
     import subprocess
 
     payload = json.dumps(
-        {"action": "__worker", "server_connection": server_connection or {}}
+        {"action": "__worker", "kind": kind, "server_connection": server_connection or {}}
     ).encode("utf-8")
     logf = open(_db_path() + ".worker.log", "ab")
     kwargs = {
@@ -1034,6 +1052,244 @@ def _clusters(conn):
 
 
 # --------------------------------------------------------------------------- #
+# Images: native-phash near-dup detection + similar-image galleries
+# --------------------------------------------------------------------------- #
+def _hex_phash(s):
+    """Stash stores an image phash as a 16-hex-char (64-bit) string -> uint."""
+    try:
+        return int(s, 16) & _MASK64
+    except (TypeError, ValueError):
+        return None
+
+
+def _enumerate_images(server_connection):
+    """Page through findImages -> [{id,title,w,h,size,phash,gallery_ids}] (phash only)."""
+    query = """
+    query($page:Int!){
+      findImages(filter:{per_page:200, page:$page, sort:"id", direction:ASC}){
+        count
+        images{
+          id title
+          galleries{ id }
+          visual_files{ ... on ImageFile { width height size fingerprints{ type value } } }
+        }
+      }
+    }
+    """
+    out, page = [], 1
+    while True:
+        block = (_gql_data(server_connection, query, {"page": page}) or {}).get("findImages") or {}
+        imgs = block.get("images") or []
+        if not imgs:
+            break
+        for im in imgs:
+            vf = im.get("visual_files") or []
+            f0 = vf[0] if vf else {}
+            ph = None
+            for fp in (f0.get("fingerprints") or []):
+                if fp.get("type") == "phash":
+                    ph = _hex_phash(fp.get("value"))
+            if ph is None:
+                continue
+            out.append({
+                "id": int(im["id"]), "title": im.get("title") or "",
+                "w": f0.get("width") or 0, "h": f0.get("height") or 0,
+                "size": f0.get("size") or 0, "phash": ph,
+                "gallery_ids": [int(g["id"]) for g in (im.get("galleries") or [])],
+            })
+        if len(out) >= (block.get("count") or 0):
+            break
+        page += 1
+    return out
+
+
+def _popcount64(arr):
+    """Vectorized popcount over a numpy uint64 array (Hamming weight)."""
+    import numpy as np
+    if hasattr(np, "bitwise_count"):
+        return np.bitwise_count(arr)
+    x = arr.astype(np.uint64)
+    x = x - ((x >> np.uint64(1)) & np.uint64(0x5555555555555555))
+    x = (x & np.uint64(0x3333333333333333)) + ((x >> np.uint64(2)) & np.uint64(0x3333333333333333))
+    x = (x + (x >> np.uint64(4))) & np.uint64(0x0F0F0F0F0F0F0F0F)
+    return (x * np.uint64(0x0101010101010101)) >> np.uint64(56)
+
+
+def _image_edges(images, cfg):
+    """Exact pairwise Hamming (vectorized) -> (dup_edges, neighbour_edges) as
+    (idx_a, idx_b, distance). Neighbour edges include dup edges (a dup is also a
+    neighbour) so they connect the similar-cluster graph."""
+    import numpy as np
+    dup_t, nb_t = cfg["image_dup_hamming"], cfg["image_neighbour_hamming"]
+    arr = np.array([im["phash"] for im in images], dtype=np.uint64)
+    n = len(arr)
+    dup, nb = [], []
+    for i in range(n - 1):
+        d = _popcount64(arr[i] ^ arr[i + 1:])
+        for jr in np.nonzero(d <= nb_t)[0]:
+            j, dist = i + 1 + int(jr), int(d[jr])
+            nb.append((i, j, dist))
+            if dist <= dup_t:
+                dup.append((i, j, dist))
+    return dup, nb
+
+
+def _components(edges):
+    """Connected components (union-find) over (a, b, _) edges -> list of index sets."""
+    from collections import defaultdict
+    parent = {}
+
+    def find(x):
+        parent.setdefault(x, x)
+        root = x
+        while parent[root] != root:
+            root = parent[root]
+        while parent[x] != root:
+            parent[x], x = root, parent[x]
+        return root
+
+    for a, b, _d in edges:
+        parent[find(a)] = find(b)
+    comp = defaultdict(set)
+    for a, b, _d in edges:
+        comp[find(a)].add(a)
+        comp[find(a)].add(b)
+    return list(comp.values())
+
+
+def _create_gallery(server_connection, cfg, image_ids):
+    """Create a gallery and add the images. Returns the gallery id (or None)."""
+    title = f"{cfg['gallery_prefix']} ({len(image_ids)})"
+    data = _gql_data(
+        server_connection,
+        "mutation($i:GalleryCreateInput!){galleryCreate(input:$i){id}}",
+        {"i": {"title": title}},
+    )
+    gid = (data.get("galleryCreate") or {}).get("id")
+    if not gid:
+        return None
+    _gql_data(
+        server_connection,
+        "mutation($g:ID!,$ids:[ID!]!){addGalleryImages(input:{gallery_id:$g,image_ids:$ids})}",
+        {"g": gid, "ids": [str(i) for i in image_ids]},
+    )
+    return gid
+
+
+def _scan_images(conn, server_connection, cfg):
+    """Enumerate images, find near-dups (keep-one) and similar clusters (galleries).
+
+    Gallery creation is gated by gallery_dry_run (default ON) so a first run only
+    reports what it WOULD create. skip_in_gallery + dry-run make it idempotent.
+    """
+    _set_status(conn, running=True, phase="img-enumerate", worker_pid=os.getpid())
+    images = _enumerate_images(server_connection)
+    _set_status(conn, images_total=len(images), phase="img-matching")
+    _log(f"images: {len(images)} with phash")
+    if len(images) < 2:
+        _set_status(conn, running=False, phase="done", finished_at=time.time(),
+                    image_dups=0, similar_clusters=0, galleries_created=0)
+        return
+
+    dup_edges, nb_edges = _image_edges(images, cfg)
+
+    # 1) near-duplicate pairs -> keep-one-flag-rest (stored for the UI)
+    with conn:
+        conn.execute("DELETE FROM image_groups")
+        conn.executemany(
+            "INSERT INTO image_groups (image_a, image_b, distance, created_at) "
+            "VALUES (?,?,?,?)",
+            [(images[a]["id"], images[b]["id"], d, time.time()) for a, b, d in dup_edges],
+        )
+
+    # 2) similar (non-identical) clusters -> Stash galleries
+    if cfg["gallery_skip_in_gallery"]:
+        nb_edges = [(a, b, d) for a, b, d in nb_edges
+                    if not images[a]["gallery_ids"] and not images[b]["gallery_ids"]]
+    clusters = [c for c in _components(nb_edges) if len(c) >= cfg["image_min_cluster"]]
+    planned = [[images[i]["id"] for i in c] for c in clusters]
+
+    created, galleries = 0, []
+    if not cfg["gallery_dry_run"]:
+        _set_status(conn, phase="img-galleries")
+        for ids in planned[: cfg["gallery_max_create"]]:
+            try:
+                gid = _create_gallery(server_connection, cfg, ids)
+                if gid:
+                    created += 1
+                    galleries.append(gid)
+            except Exception as ex:
+                _log(f"gallery create failed: {ex}")
+            if created % 10 == 0:
+                _set_status(conn, galleries_created=created)
+
+    _meta_set(conn, "image_summary", {
+        "images": len(images), "dup_pairs": len(dup_edges),
+        "similar_clusters": len(clusters), "planned_galleries": len(planned),
+        "galleries_created": created, "dry_run": cfg["gallery_dry_run"],
+        "cluster_sizes": sorted((len(p) for p in planned), reverse=True)[:20],
+    })
+    _set_status(conn, running=False, phase="done", finished_at=time.time(),
+                image_dups=len(dup_edges), similar_clusters=len(clusters),
+                galleries_created=created)
+    _log(f"images: {len(dup_edges)} dup-pairs, {len(clusters)} similar clusters, "
+         f"{created} galleries created (dry_run={cfg['gallery_dry_run']})")
+
+
+def _worker_loop_images(server_connection):
+    _log(f"image worker started pid={os.getpid()}")
+    conn = _connect()
+    try:
+        cfg = _get_config(conn)
+        _scan_images(conn, server_connection, cfg)
+    except Exception as ex:
+        _log(f"image worker error: {type(ex).__name__}: {ex}")
+        try:
+            _set_status(conn, running=False, phase="error", error=str(ex))
+        except Exception:
+            pass
+    finally:
+        conn.close()
+    _log("image worker finished")
+
+
+def _image_clusters(conn, server_connection):
+    """Cluster near-duplicate image pairs into keep-one groups, enriched with
+    image meta (title/dimensions/thumbnail) fetched from Stash."""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT image_a, image_b, distance FROM image_groups")]
+    if not rows:
+        return []
+    comps = _components([(r["image_a"], r["image_b"], r["distance"]) for r in rows])
+    ids = sorted({i for c in comps for i in c})
+    meta = {}
+    if ids and server_connection:
+        data = _gql_data(
+            server_connection,
+            "query($ids:[ID!]){findImages(image_ids:$ids, filter:{per_page:-1}){images{"
+            "id title visual_files{ ... on ImageFile { width height size }}}}}",
+            {"ids": [str(i) for i in ids]},
+        )
+        for im in ((data.get("findImages") or {}).get("images") or []):
+            vf = (im.get("visual_files") or [{}])[0]
+            meta[int(im["id"])] = {
+                "title": im.get("title") or "", "w": vf.get("width") or 0,
+                "h": vf.get("height") or 0, "size": vf.get("size") or 0,
+            }
+    clusters = []
+    for c in comps:
+        parent = max(c, key=lambda i: (meta.get(i, {}).get("w", 0) * meta.get(i, {}).get("h", 0),
+                                       meta.get(i, {}).get("size", 0), i))
+        clusters.append({
+            "parent": {"image_id": parent, "meta": meta.get(parent)},
+            "members": [{"image_id": i, "meta": meta.get(i)} for i in c if i != parent],
+            "size": len(c) - 1,
+        })
+    clusters.sort(key=lambda c: -c["size"])
+    return clusters
+
+
+# --------------------------------------------------------------------------- #
 # Actions
 # --------------------------------------------------------------------------- #
 def action_check(args):
@@ -1243,6 +1499,83 @@ def action_delete_scenes(args):
         finally:
             conn.close()
     _log(f"delete_scenes: deleted {len(deleted)}, failed {len(failed)}, files={delete_file}")
+    return {"deleted": deleted, "failed": failed, "delete_file": delete_file}
+
+
+def action_scan_images(args):
+    """Start a (detached) image scan: native-phash near-dups + similar galleries."""
+    conn = _connect()
+    try:
+        st = _meta_get(conn, "scan_status", {}) or {}
+        if st.get("running") and _pid_alive(st.get("worker_pid")):
+            return {"started": False, "reason": "already running", "status": st}
+        if not _SERVER_CONNECTION:
+            raise PdcError("no server_connection (run inside Stash)")
+        _set_status(conn, running=True, phase="img-starting", scope="images",
+                    error=None, started_at=time.time(), worker_pid=None)
+    finally:
+        conn.close()
+    try:
+        pid = _spawn_worker(_SERVER_CONNECTION, kind="images")
+    except Exception as ex:
+        conn = _connect()
+        try:
+            _set_status(conn, running=False, phase="error", error=f"spawn failed: {ex}")
+        finally:
+            conn.close()
+        raise PdcError(f"failed to start image worker: {ex}")
+    conn = _connect()
+    try:
+        _set_status(conn, worker_pid=pid)
+        summary = _meta_get(conn, "image_summary", {})
+    finally:
+        conn.close()
+    return {"started": True, "worker_pid": pid, "last_summary": summary}
+
+
+def action_image_clusters(args):
+    """Near-duplicate image groups (keep largest, flag the rest)."""
+    conn = _connect()
+    try:
+        clusters = _image_clusters(conn, _SERVER_CONNECTION)
+        summary = _meta_get(conn, "image_summary", {})
+        return {"count": len(clusters), "clusters": clusters, "summary": summary}
+    finally:
+        conn.close()
+
+
+def action_delete_images(args):
+    """Delete the given images from Stash (optionally their files) + purge index."""
+    ids = args.get("image_ids") or []
+    if not isinstance(ids, list) or not ids:
+        raise PdcError("image_ids (non-empty list) required")
+    delete_file = bool(args.get("delete_file", True))
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    sc = _SERVER_CONNECTION
+    deleted, failed = [], []
+    for iid in ids:
+        try:
+            _gql_data(
+                sc,
+                "mutation($i:ImagesDestroyInput!){imagesDestroy(input:$i)}",
+                {"i": {"ids": [str(iid)], "delete_file": delete_file,
+                       "delete_generated": True}},
+            )
+            deleted.append(int(iid))
+        except Exception as ex:
+            failed.append({"image_id": iid, "error": str(ex)})
+    if deleted:
+        conn = _connect()
+        try:
+            q = ",".join("?" * len(deleted))
+            with conn:
+                conn.execute(
+                    f"DELETE FROM image_groups WHERE image_a IN ({q}) OR image_b IN ({q})",
+                    deleted + deleted)
+        finally:
+            conn.close()
+    _log(f"delete_images: deleted {len(deleted)}, failed {len(failed)}, files={delete_file}")
     return {"deleted": deleted, "failed": failed, "delete_file": delete_file}
 
 
@@ -1501,6 +1834,9 @@ ACTIONS = {
     "results": action_results,
     "clusters": action_clusters,
     "delete_scenes": action_delete_scenes,
+    "scan_images": action_scan_images,
+    "image_clusters": action_image_clusters,
+    "delete_images": action_delete_images,
     "apply": action_apply,
     "reset": action_reset,
 }
@@ -1538,7 +1874,10 @@ def main():
     # Detached worker is not a request/response action — it runs the pipeline and
     # writes progress to the DB until done.
     if action == "__worker":
-        _worker_loop(_SERVER_CONNECTION)
+        if args.get("kind") == "images":
+            _worker_loop_images(_SERVER_CONNECTION)
+        else:
+            _worker_loop(_SERVER_CONNECTION)
         sys.exit(0)
 
     handler = ACTIONS.get(action)
