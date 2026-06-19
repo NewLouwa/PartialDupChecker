@@ -1266,9 +1266,9 @@ def _image_clusters(conn, server_connection):
     if ids and server_connection:
         data = _gql_data(
             server_connection,
-            "query($ids:[ID!]){findImages(image_ids:$ids, filter:{per_page:-1}){images{"
+            "query($ids:[Int!]){findImages(image_ids:$ids, filter:{per_page:-1}){images{"
             "id title visual_files{ ... on ImageFile { width height size }}}}}",
-            {"ids": [str(i) for i in ids]},
+            {"ids": ids},
         )
         for im in ((data.get("findImages") or {}).get("images") or []):
             vf = (im.get("visual_files") or [{}])[0]
