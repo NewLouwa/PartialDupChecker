@@ -27,8 +27,11 @@
   font-size: .9rem;
 }
 
+.pdc-media { display: flex; gap: .4rem; margin-bottom: .75rem; }
 .pdc-tabs { display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap; }
 .pdc-tab { min-width: 5rem; }
+.pdc-imgbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.pdc-dry { margin: 0; }
 
 .pdc-help-btn { margin-left: auto; }
 .pdc-help {
