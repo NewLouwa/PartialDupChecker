@@ -137,7 +137,8 @@
       e("div", { className: "pdc-members" },
         cluster.members.map((m) => {
           const lv = LEVELS[m.level] || { label: m.level || "?", variant: "secondary" };
-          const r = m.runs && m.runs[0] ? ` - ${fmtTime(r.b_start)}-${fmtTime(r.b_end)}` : "";
+          const rg = m.runs && m.runs[0];
+          const r = rg ? ` - ${fmtTime(rg.b_start)}-${fmtTime(rg.b_end)}` : "";
           return e("label", { key: m.scene_id, className: "pdc-member" + (selected.has(m.scene_id) ? " pdc-sel" : "") },
             e(Form.Check, { type: "checkbox", checked: selected.has(m.scene_id), onChange: () => onToggle(m.scene_id), className: "pdc-check" }),
             sThumb(m.scene_id, m.meta),
