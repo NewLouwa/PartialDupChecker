@@ -49,7 +49,7 @@ _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_vendor")
 if os.path.isdir(_VENDOR) and _VENDOR not in sys.path:
     sys.path.append(_VENDOR)
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 PLUGIN_ID = "partial_dup_checker"
 LOG_PREFIX = "[partialdup]"
 
@@ -196,7 +196,7 @@ CREATE TABLE IF NOT EXISTS groups (
 DEFAULT_CONFIG = {
     "mode": "hybrid",            # 'fast' | 'deep' | 'hybrid'
     "deep_interval_s": 2.0,      # ffmpeg deep-pass sampling cadence (seconds)
-    "segment_hamming": 6,        # max per-segment Hamming distance for a match (stricter = fewer coincidences)
+    "segment_hamming": 7,        # max per-segment Hamming distance for a match (stricter = fewer coincidences)
     "band_count": 4,             # LSH bands (64 bits / 4 = 16-bit bands)
     "min_candidate_segs": 4,     # scene pair shortlisted if it shares >= this many segments
     "min_run_segs": 2,           # ignore matched runs shorter than this (noise)
@@ -209,8 +209,8 @@ DEFAULT_CONFIG = {
     "max_deep_seconds": 900,     # hybrid: wall-clock cap on deep-confirm (guarantees the scan finishes)
     "dup_min_coverage": 0.95,    # DUPLICATE: coverage both ways
     "part_min_coverage": 0.90,   # PART: longest contiguous run as a fraction of the shorter
-    "cut_min_coverage": 0.70,    # CUT/MONTAGE: total coverage of the shorter clip
-    "min_match_seconds": 12.0,   # reject matches whose longest shared run is shorter than this
+    "cut_min_coverage": 0.60,    # CUT/MONTAGE: total coverage of the shorter clip
+    "min_match_seconds": 6.0,    # reject matches whose longest shared run is shorter than this
                                  # (unless the clip is near-fully covered) — kills scattered
                                  # coincidental frame matches between similar-looking videos
     "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
@@ -222,7 +222,7 @@ DEFAULT_CONFIG = {
     "image_min_cluster": 3,      # similar clusters smaller than this are ignored
     "image_max_bucket": 800,     # skip non-discriminative phash band buckets
     "gallery_prefix": "Similar images",  # gallery title prefix
-    "gallery_skip_in_gallery": True,     # only cluster images not already in a gallery (idempotent)
+    "gallery_skip_in_gallery": False,    # cluster similar images even across existing galleries
     "gallery_dry_run": True,     # report planned galleries WITHOUT creating them (safety default)
     "gallery_max_create": 200,   # cap galleries created per run
 }

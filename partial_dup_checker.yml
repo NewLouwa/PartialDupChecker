@@ -1,6 +1,6 @@
 name: Partial Duplicate Checker
-description: Finds partial video duplicates Stash's whole-file phash misses — cuts, parts, and montages — classified into Duplicate / Part / Cut-Montage. Complements the built-in duplicate checker; never mutates the library unless you opt in.
-version: 0.1.0
+description: Finds duplicates Stash's whole-file phash misses - partial video matches (cuts, parts, montages) and near-duplicate images, plus auto-collecting similar images into galleries. Complements the built-in duplicate checker; never mutates the library unless you opt in.
+version: 0.2.0
 ui:
   javascript:
     - partialdup.js
@@ -15,7 +15,7 @@ exec:
 interface: raw
 tasks:
   # The JS UI calls actions via runPluginOperation(args:{action:...}); this task
-  # also lets a user kick off a full scan from Settings ▸ Tasks.
+  # also lets a user kick off a full scan from Settings > Tasks.
   - name: Scan Library for Partial Duplicates
     description: Fingerprint the library and detect partial/cut/montage duplicates.
     defaultArgs:
