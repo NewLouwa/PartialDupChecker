@@ -62,8 +62,23 @@ _SERVER_CONNECTION = None
 # Result encoding + logging
 # --------------------------------------------------------------------------- #
 def _log(msg):
-    """Write a line to stderr (line-buffered) — shows up in Stash's plugin log."""
+    """Write a line to stderr (line-buffered) - shows up in Stash's plugin log."""
     print(f"{LOG_PREFIX} {msg}", file=sys.stderr, flush=True)
+
+
+def _plog(level, msg):
+    """Emit the Stash plugin-log protocol on stderr: SOH<level>STX<message>.
+    When the plugin runs as a Stash Task this drives the Tasks log + progress bar
+    (level 'p' = progress 0..1). Harmless when detached (goes to the worker log)."""
+    try:
+        sys.stderr.write("\x01%s\x02%s\n" % (level, msg))
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _progress(frac):
+    _plog("p", "%.4f" % max(0.0, min(1.0, float(frac))))
 
 
 def _write(result, error):
@@ -1185,6 +1200,7 @@ def _scan_images(conn, server_connection, cfg):
     _set_status(conn, running=True, phase="img-enumerate", worker_pid=os.getpid())
     images = _enumerate_images(server_connection)
     _set_status(conn, images_total=len(images), phase="img-matching")
+    _progress(0.35)
     _log(f"images: {len(images)} with phash")
     if len(images) < 2:
         _set_status(conn, running=False, phase="done", finished_at=time.time(),
@@ -1229,11 +1245,14 @@ def _scan_images(conn, server_connection, cfg):
         "galleries_created": created, "dry_run": cfg["gallery_dry_run"],
         "cluster_sizes": sorted((len(p) for p in planned), reverse=True)[:20],
     })
+    _progress(1.0)
     _set_status(conn, running=False, phase="done", finished_at=time.time(),
                 image_dups=len(dup_edges), similar_clusters=len(clusters),
                 galleries_created=created)
     _log(f"images: {len(dup_edges)} dup-pairs, {len(clusters)} similar clusters, "
          f"{created} galleries created (dry_run={cfg['gallery_dry_run']})")
+    _plog("i", f"Image scan complete: {len(dup_edges)} dup-pairs, {len(clusters)} "
+               f"similar clusters, {created} galleries (dry_run={cfg['gallery_dry_run']})")
 
 
 def _worker_loop_images(server_connection):
@@ -1801,16 +1820,20 @@ def _worker_loop(server_connection):
             if done % 5 == 0 or done == len(scenes):
                 _set_status(conn, scenes_done=done, errors=errors,
                             segments=total_segments)
+                _progress(0.70 * done / max(1, len(scenes)))  # indexing = first 70%
         _meta_set(conn, "deep_failed_files", sorted(deep_failed)[:5000])
 
         _set_status(conn, scenes_done=done, errors=errors, segments=total_segments,
                     phase="matching")
         _log(f"indexed {done} scenes, {total_segments} segments, {errors} errors")
 
+        _progress(0.72)
         groups = _match_and_classify(conn, cfg, server_connection, ffmpeg)
+        _progress(1.0)
 
         _set_status(conn, running=False, phase="done", groups=groups,
                     finished_at=time.time())
+        _plog("i", f"Partial dup scan complete: {groups} match group(s)")
     except Exception as e:
         _log(f"worker error: {type(e).__name__}: {e}")
         try:
@@ -1825,8 +1848,55 @@ def _worker_loop(server_connection):
 # --------------------------------------------------------------------------- #
 # Dispatch
 # --------------------------------------------------------------------------- #
+def _guard_running():
+    conn = _connect()
+    try:
+        st = _meta_get(conn, "scan_status", {}) or {}
+        return bool(st.get("running") and _pid_alive(st.get("worker_pid")))
+    finally:
+        conn.close()
+
+
+def action_task_scan(args):
+    """Run the VIDEO scan IN-PROCESS as a Stash Task: drives the Tasks progress
+    bar and fires Stash's job-completion notification. (Settings > Tasks uses
+    this; the plugin's own page uses the detached-worker path.)"""
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    if _guard_running():
+        _plog("w", "a scan is already running; skipping")
+        return {"skipped": True, "reason": "already running"}
+    _plog("i", "Scanning library for partial video duplicates...")
+    _worker_loop(_SERVER_CONNECTION)  # in-process; Stash tracks it as a Job
+    conn = _connect()
+    try:
+        st = _meta_get(conn, "scan_status", {}) or {}
+    finally:
+        conn.close()
+    return {"done": True, "groups": st.get("groups"), "phase": st.get("phase")}
+
+
+def action_task_scan_images(args):
+    """Run the IMAGE scan IN-PROCESS as a Stash Task (progress + notification)."""
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    if _guard_running():
+        _plog("w", "a scan is already running; skipping")
+        return {"skipped": True, "reason": "already running"}
+    _plog("i", "Scanning images for duplicates and similar clusters...")
+    _worker_loop_images(_SERVER_CONNECTION)
+    conn = _connect()
+    try:
+        summary = _meta_get(conn, "image_summary", {})
+    finally:
+        conn.close()
+    return {"done": True, "summary": summary}
+
+
 ACTIONS = {
     "check": action_check,
+    "task_scan": action_task_scan,
+    "task_scan_images": action_task_scan_images,
     "get_config": action_get_config,
     "set_config": action_set_config,
     "scan": action_scan,

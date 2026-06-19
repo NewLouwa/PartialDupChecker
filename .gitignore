@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 _vendor/
+dist/
 *.sqlite
 *.sqlite-journal
 *.worker.log

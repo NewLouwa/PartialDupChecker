@@ -559,5 +559,29 @@ class ImageScanTests(unittest.TestCase):
         self.assertIn("image_ids", res["error"])
 
 
+class TaskLogTests(unittest.TestCase):
+    def test_plog_protocol(self):
+        import io
+        buf = io.StringIO()
+        with patch.object(partialdup.sys, "stderr", buf):
+            partialdup._plog("i", "hello")
+            partialdup._progress(0.5)
+        out = buf.getvalue()
+        self.assertIn("\x01i\x02hello\n", out)
+        self.assertIn("\x01p\x020.5000\n", out)
+
+    def test_task_scan_requires_server_connection(self):
+        partialdup._SERVER_CONNECTION = None
+        res = _run_main({"action": "task_scan"})
+        self.assertIsNotNone(res["error"])
+        self.assertIn("server_connection", res["error"])
+
+    def test_task_scan_images_requires_server_connection(self):
+        partialdup._SERVER_CONNECTION = None
+        res = _run_main({"action": "task_scan_images"})
+        self.assertIsNotNone(res["error"])
+        self.assertIn("server_connection", res["error"])
+
+
 if __name__ == "__main__":
     unittest.main()
