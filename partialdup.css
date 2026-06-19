@@ -32,6 +32,7 @@
 .pdc-tab { min-width: 5rem; }
 .pdc-imgbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
 .pdc-dry { margin: 0; }
+.pdc-exclude { max-width: 200px; display: inline-block; }
 
 .pdc-help-btn { margin-left: auto; }
 .pdc-help {

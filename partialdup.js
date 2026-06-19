@@ -187,6 +187,8 @@
     const [iClusters, setIClusters] = React.useState([]);
     const [iSummary, setISummary] = React.useState(null);
     const [dryRun, setDryRun] = React.useState(true);
+    const [skipGal, setSkipGal] = React.useState(true);
+    const [excludeIds, setExcludeIds] = React.useState("");
     const [status, setStatus] = React.useState(null);
     const [tab, setTab] = React.useState("ALL");
     const [selected, setSelected] = React.useState(() => new Set());
@@ -217,6 +219,16 @@
       } catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run]);
 
+    const loadConfig = React.useCallback(async () => {
+      try {
+        const c = await run("get_config");
+        if (!aliveRef.current || !c) return;
+        if (typeof c.gallery_dry_run === "boolean") setDryRun(c.gallery_dry_run);
+        if (typeof c.gallery_skip_in_gallery === "boolean") setSkipGal(c.gallery_skip_in_gallery);
+        setExcludeIds((c.gallery_exclude_ids || []).join(","));
+      } catch (ex) { /* non-fatal */ }
+    }, [run]);
+
     React.useEffect(() => {
       aliveRef.current = true;
       let prev = false;
@@ -231,9 +243,9 @@
         } catch (ex) { /* transient */ }
         if (aliveRef.current) setTimeout(poll, 3000);
       };
-      loadVideo(); loadImage(); poll();
+      loadVideo(); loadImage(); loadConfig(); poll();
       return () => { aliveRef.current = false; };
-    }, [run, loadVideo, loadImage]);
+    }, [run, loadVideo, loadImage, loadConfig]);
 
     const switchMedia = (m) => { setMedia(m); setSelected(new Set()); setTab("ALL"); setErr(null); };
     const startScan = async () => {
@@ -249,6 +261,16 @@
       const nv = !dryRun;
       setDryRun(nv);
       try { await run("set_config", { config: { gallery_dry_run: nv } }); } catch (ex) { setErr(ex.message || String(ex)); }
+    };
+    const toggleSkipGal = async () => {
+      const nv = !skipGal;
+      setSkipGal(nv);
+      try { await run("set_config", { config: { gallery_skip_in_gallery: nv } }); } catch (ex) { setErr(ex.message || String(ex)); }
+    };
+    const applyExclude = async () => {
+      const ids = excludeIds.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+      try { await run("set_config", { config: { gallery_exclude_ids: ids } }); setExcludeIds(ids.join(",")); }
+      catch (ex) { setErr(ex.message || String(ex)); }
     };
 
     const toggle = (id) => setSelected((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -324,6 +346,12 @@
             iSummary ? e("span", { className: "pdc-status" },
               `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
               + `${iSummary.galleries_created || 0} galleries${(iSummary.planned_galleries || 0) ? ` (${iSummary.planned_galleries} planned)` : ""}`) : null,
+            e(Form.Check, { type: "switch", id: "pdc-skipgal", className: "pdc-dry",
+              checked: skipGal, onChange: toggleSkipGal,
+              label: "Ignore images already in a gallery" }),
+            e(Form.Control, { type: "text", size: "sm", className: "pdc-exclude",
+              placeholder: "Skip gallery IDs (e.g. 3,17)", value: excludeIds,
+              onChange: (ev) => setExcludeIds(ev.target.value), onBlur: applyExclude }),
             e(Form.Check, { type: "switch", id: "pdc-dry", className: "pdc-dry",
               checked: !dryRun, onChange: toggleDryRun,
               label: dryRun ? "Galleries: dry-run (report only)" : "Galleries: WILL be created on next scan" })),

@@ -237,7 +237,11 @@ DEFAULT_CONFIG = {
     "image_min_cluster": 3,      # similar clusters smaller than this are ignored
     "image_max_bucket": 800,     # skip non-discriminative phash band buckets
     "gallery_prefix": "Similar images",  # gallery title prefix
-    "gallery_skip_in_gallery": False,    # cluster similar images even across existing galleries
+    "gallery_skip_in_gallery": True,     # default: ignore images already in ANY gallery (only
+                                         # cluster un-galleried images). Set False to cluster
+                                         # across galleries (uses gallery_exclude_ids below).
+    "gallery_exclude_ids": [],           # gallery ids whose images are excluded from the scan
+                                         # entirely (dup + similar) - "skip this gallery"
     "gallery_dry_run": True,     # report planned galleries WITHOUT creating them (safety default)
     "gallery_max_create": 200,   # cap galleries created per run
 }
@@ -1199,6 +1203,12 @@ def _scan_images(conn, server_connection, cfg):
     """
     _set_status(conn, running=True, phase="img-enumerate", worker_pid=os.getpid())
     images = _enumerate_images(server_connection)
+    # "Skip this gallery": drop images in excluded galleries from the whole scan.
+    exclude = set(cfg.get("gallery_exclude_ids") or [])
+    if exclude:
+        before = len(images)
+        images = [im for im in images if not (set(im["gallery_ids"]) & exclude)]
+        _log(f"images: excluded {before - len(images)} in galleries {sorted(exclude)}")
     _set_status(conn, images_total=len(images), phase="img-matching")
     _progress(0.35)
     _log(f"images: {len(images)} with phash")
@@ -1357,6 +1367,10 @@ def action_set_config(args):
                        "(e.g. 2, 4, 8, 16, 32)")
     if "mode" in updates and updates["mode"] not in ("fast", "deep", "hybrid"):
         raise PdcError("mode must be 'fast', 'deep', or 'hybrid'")
+    if "gallery_exclude_ids" in updates:
+        v = updates["gallery_exclude_ids"]
+        if not isinstance(v, list) or not all(isinstance(x, int) for x in v):
+            raise PdcError("gallery_exclude_ids must be a list of integer gallery ids")
     conn = _connect()
     try:
         saved = _meta_get(conn, "config", {}) or {}
