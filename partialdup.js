@@ -29,6 +29,81 @@
     CUT: { label: "Cut/Montage", variant: "info" },
   };
 
+  // In-app help (standard help-doc structure). See HELP.md for the full version.
+  const HELP = [
+    { t: "Overview", c: [
+      ["p", "Finds duplicates Stash's built-in checker can't see — clips, cuts and " +
+        "montages taken from videos you already have. It builds a fingerprint timeline " +
+        "of each video instead of one hash of the whole file. It runs alongside the " +
+        "built-in checker and never changes your library unless you delete or tag something."],
+    ]},
+    { t: "Quick start", c: [
+      ["ol", [
+        "Click Scan library — it fingerprints every scene and finds matches (runs in the background).",
+        "Each result box is one longer video (kept) with the shorter clips/duplicates of it below.",
+        "Tick the clips you want to remove, click Delete N file(s), and confirm.",
+      ]],
+    ]},
+    { t: "Understanding the results", c: [
+      ["p", "Each box groups everything related to one longest video. The video at the " +
+        "top is marked KEEP · longest — the most complete copy. Below it are the matching " +
+        "shorter scenes, each with a level:"],
+      ["dl", [
+        ["Duplicate", "The same content end to end (a re-encode, recrop, or rewatermark)."],
+        ["Part", "A contiguous chunk cut out of the longer video."],
+        ["Cut / Montage", "A partial, reordered, or spliced overlap — a compilation."],
+      ]],
+      ["p", "Each clip shows the match % (how much of that clip was found in the longer " +
+        "video) and the matched time range. The All / Duplicate / Part / Cut-Montage tabs " +
+        "filter boxes by level."],
+    ]},
+    { t: "Deleting duplicates", c: [
+      ["p", "Tick the clips to remove, then Delete N file(s) → confirm. It deletes those " +
+        "scenes AND their files from disk (this cannot be undone) and removes them from the " +
+        "results. The longest video (KEEP) is never selectable, so you can't delete the copy " +
+        "you're keeping by accident."],
+    ]},
+    { t: "Scanning", c: [
+      ["ul", [
+        "Runs in a detached background worker — closing the tab won't stop it.",
+        "The first scan is slowest; re-scans skip scenes whose file hasn't changed.",
+        "If it looks stuck (running but no movement), a Reset stuck scan button appears — click it, then scan again.",
+      ]],
+    ]},
+    { t: "False positives / tuning", c: [
+      ["p", "Because it compares image fingerprints, very similar-looking videos can " +
+        "occasionally be matched even when different. The matcher is tunable via the " +
+        "set_config operation — segment_hamming (lower = stricter), cut_min_coverage " +
+        "(raise to require more overlap), and min_match_seconds (require a longer shared " +
+        "run, the best lever against scattered coincidences). Re-scan after changing them; " +
+        "no re-fingerprinting is needed."],
+    ]},
+    { t: "FAQ", c: [
+      ["dl", [
+        ["Does it change my library?", "No. Scanning only reads. Tags, markers and deletes happen only when you click them."],
+        ["Why isn't it a tab on the built-in checker page?", "Stash 0.31 doesn't let plugins patch that page, so it lives as its own page in the nav."],
+        ["A video I expected is missing.", "It may have an unreadable file or share too little to pass the threshold. The plugin log lists scenes it couldn't index."],
+      ]],
+    ]},
+  ];
+
+  const renderHelp = () => HELP.map((s, i) =>
+    React.createElement("section", { key: i, className: "pdc-help-sec" },
+      React.createElement("h4", null, s.t),
+      s.c.map((blk, j) => {
+        const [kind, val] = blk;
+        if (kind === "p") return React.createElement("p", { key: j }, val);
+        if (kind === "ul")
+          return React.createElement("ul", { key: j }, val.map((x, k) => React.createElement("li", { key: k }, x)));
+        if (kind === "ol")
+          return React.createElement("ol", { key: j }, val.map((x, k) => React.createElement("li", { key: k }, x)));
+        if (kind === "dl")
+          return React.createElement("dl", { key: j }, val.flatMap((pr, k) =>
+            [React.createElement("dt", { key: "t" + k }, pr[0]),
+             React.createElement("dd", { key: "d" + k }, pr[1])]));
+        return null;
+      })));
+
   const RUN_OPERATION = gql`
     mutation PartialDup_Run($id: ID!, $args: Map!) {
       runPluginOperation(plugin_id: $id, args: $args)
@@ -114,6 +189,7 @@
     const [tab, setTab] = React.useState("ALL");
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
+    const [showHelp, setShowHelp] = React.useState(false);
     const aliveRef = React.useRef(true);
 
     const run = React.useCallback(async (action, extra) => {
@@ -234,7 +310,18 @@
         progress,
         (status && status.running && status.worker_alive === false)
           ? e(Button, { size: "sm", variant: "warning", onClick: resetScan },
-              "Reset stuck scan") : null),
+              "Reset stuck scan") : null,
+        e(Button, { size: "sm", variant: showHelp ? "info" : "outline-info",
+          className: "pdc-help-btn", onClick: () => setShowHelp((v) => !v),
+          title: "How this works" }, showHelp ? "Hide help" : "Help")),
+      showHelp
+        ? e("div", { className: "pdc-help" },
+            e("div", { className: "pdc-help-head" },
+              e("strong", null, "Partial Duplicate Checker — Help"),
+              e(Button, { size: "sm", variant: "outline-secondary",
+                onClick: () => setShowHelp(false) }, "Close")),
+            renderHelp())
+        : null,
       err ? e("div", { className: "pdc-error" }, `Error: ${err}`) : null,
       e("div", { className: "pdc-tabs" },
         tabBtn("ALL", `All (${totalMatches})`), tabBtn("DUPLICATE", "Duplicate"),

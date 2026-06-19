@@ -207,6 +207,7 @@ DEFAULT_CONFIG = {
                                  # coincidental frame matches between similar-looking videos
     "ffmpeg_path": "",           # override; else PDC_FFMPEG env / PATH
     "ffprobe_path": "",          # override; else PDC_FFPROBE env / PATH
+    "ffmpeg_timeout_s": 600,     # hard cap per video decode (bounds a hung/bad file)
 }
 
 
@@ -500,9 +501,13 @@ def _sprite_timeline(scene, server_connection):
     return timeline
 
 
-def _ffmpeg_timeline(path, interval_s, ffmpeg):
+def _ffmpeg_timeline(path, interval_s, ffmpeg, timeout=600):
     """Deep pass: sample 1 frame / interval_s, scaled to 32x32 gray, via a raw
-    pipe (no temp files, no Pillow) → ordered [(t_seconds, phash)] timeline."""
+    pipe (no temp files, no Pillow) → ordered [(t_seconds, phash)] timeline.
+
+    A hard timeout bounds a single decode: a malformed/huge file could otherwise
+    make ffmpeg hang and freeze the whole scan. On timeout the scene is skipped.
+    """
     import subprocess
 
     import numpy as np
@@ -517,7 +522,11 @@ def _ffmpeg_timeline(path, interval_s, ffmpeg):
         "-vf", f"fps=1/{interval_s},scale=32:32,format=gray",
         "-f", "rawvideo", "pipe:1",
     ]
-    proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise PdcError(f"ffmpeg timed out after {timeout}s: {path}")
     if proc.returncode != 0:
         raise PdcError(f"ffmpeg failed: {proc.stderr.decode('utf-8', 'replace')[:200]}")
     data = proc.stdout
@@ -556,7 +565,8 @@ def _index_scene(conn, scene, pass_kind, cfg, server_connection, ffmpeg):
         return row["n_segments"]
 
     if pass_kind == "deep":
-        timeline = _ffmpeg_timeline(scene["path"], cfg["deep_interval_s"], ffmpeg)
+        timeline = _ffmpeg_timeline(scene["path"], cfg["deep_interval_s"], ffmpeg,
+                                    cfg.get("ffmpeg_timeout_s", 600))
     else:
         timeline = _sprite_timeline(scene, server_connection)
 
@@ -833,7 +843,8 @@ def _deep_segments(conn, sid, cfg, ffmpeg, cache):
         return cache[sid]
     row = conn.execute("SELECT path FROM scenes WHERE scene_id=?", (sid,)).fetchone()
     try:
-        tl = _ffmpeg_timeline(row["path"], cfg["deep_interval_s"], ffmpeg) if row else []
+        tl = _ffmpeg_timeline(row["path"], cfg["deep_interval_s"], ffmpeg,
+                              cfg.get("ffmpeg_timeout_s", 600)) if row else []
         segs = [(i, t, h) for i, (t, h) in enumerate(tl)]
     except Exception as e:
         _log(f"deep-confirm scene {sid} failed: {e}")
@@ -1417,29 +1428,47 @@ def _worker_loop(server_connection):
         _set_status(conn, scenes_total=len(scenes), phase="indexing")
         _log(f"enumerated {len(scenes)} scenes; indexing pass={primary}")
 
+        # Files whose deep decode failed/timed out before — skip the (slow) deep
+        # fallback for them on re-runs so one bad/huge file can't waste the timeout
+        # every scan. Cleared automatically if the scene later becomes indexable.
+        deep_failed = set(_meta_get(conn, "deep_failed_files", []) or [])
         done = errors = total_segments = 0
         for s in scenes:
+            fh = _file_hash(s)
+            n, ok, want_deep = 0, False, False
             try:
                 n = _index_scene(conn, s, primary, cfg, server_connection, ffmpeg)
                 # Fast pass empty (no sprite) → fall back to deep if available.
                 if n == 0 and primary == "fast" and ffmpeg:
-                    n = _index_scene(conn, s, "deep", cfg, server_connection, ffmpeg)
-                total_segments += n
-            except Exception as e:
-                errors += 1
-                _log(f"index scene {s.get('id')} failed: {type(e).__name__}: {e}")
-                # As a fallback, try the deep pass when the fast pass errored.
+                    want_deep = True
+                else:
+                    ok = True
+            except Exception as ex:
+                _log(f"index scene {s.get('id')} ({primary}) failed: {type(ex).__name__}: {ex}")
                 if primary == "fast" and ffmpeg:
+                    want_deep = True
+                elif primary == "deep":
+                    deep_failed.add(fh)
+            if want_deep:
+                if fh in deep_failed:
+                    pass  # known slow/bad deep decode — skip (don't re-burn the timeout)
+                else:
                     try:
-                        total_segments += _index_scene(
-                            conn, s, "deep", cfg, server_connection, ffmpeg)
-                        errors -= 1
-                    except Exception as e2:
-                        _log(f"  deep fallback also failed: {e2}")
+                        n = _index_scene(conn, s, "deep", cfg, server_connection, ffmpeg)
+                        ok = True
+                    except Exception as ex2:
+                        _log(f"  deep fallback failed: {ex2}")
+                        deep_failed.add(fh)
+            if ok:
+                total_segments += n
+                deep_failed.discard(fh)   # indexable now (e.g. sprite exists) — allow deep again
+            else:
+                errors += 1
             done += 1
             if done % 5 == 0 or done == len(scenes):
                 _set_status(conn, scenes_done=done, errors=errors,
                             segments=total_segments)
+        _meta_set(conn, "deep_failed_files", sorted(deep_failed)[:5000])
 
         _set_status(conn, scenes_done=done, errors=errors, segments=total_segments,
                     phase="matching")
