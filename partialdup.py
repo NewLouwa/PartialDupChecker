@@ -1586,18 +1586,29 @@ def action_delete_images(args):
     if not _SERVER_CONNECTION:
         raise PdcError("no server_connection (run inside Stash)")
     sc = _SERVER_CONNECTION
+
+    def _destroy(batch):
+        _gql_data(
+            sc,
+            "mutation($i:ImagesDestroyInput!){imagesDestroy(input:$i)}",
+            {"i": {"ids": [str(x) for x in batch], "delete_file": delete_file,
+                   "delete_generated": True}},
+        )
+
     deleted, failed = [], []
-    for iid in ids:
+    chunk = 100
+    for i in range(0, len(ids), chunk):
+        batch = ids[i:i + chunk]
         try:
-            _gql_data(
-                sc,
-                "mutation($i:ImagesDestroyInput!){imagesDestroy(input:$i)}",
-                {"i": {"ids": [str(iid)], "delete_file": delete_file,
-                       "delete_generated": True}},
-            )
-            deleted.append(int(iid))
-        except Exception as ex:
-            failed.append({"image_id": iid, "error": str(ex)})
+            _destroy(batch)  # bulk delete (fast for "delete all duplicates")
+            deleted.extend(int(x) for x in batch)
+        except Exception:
+            for x in batch:  # isolate which ids in the failed chunk are bad
+                try:
+                    _destroy([x])
+                    deleted.append(int(x))
+                except Exception as ex:
+                    failed.append({"image_id": x, "error": str(ex)})
     if deleted:
         conn = _connect()
         try:

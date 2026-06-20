@@ -152,31 +152,37 @@
         })));
   };
 
-  // ---- image cluster card ------------------------------------------------ //
-  const ImageCard = ({ cluster, selected, onToggle, onAll }) => {
-    const p = cluster.parent || {}, pm = p.meta || {};
+  // ---- image cluster card (grid, pick the keeper, delete the rest) -------- //
+  const ImageCard = ({ cluster, keeperId, selected, onToggle, onSetKeeper, onDeleteCluster, busy }) => {
     const px = (m) => m && m.w && m.h ? `${m.w}x${m.h}` : "";
-    const allSel = cluster.members.length > 0 && cluster.members.every((m) => selected.has(m.image_id));
+    const ckey = cluster.parent.image_id;
+    const items = [{ id: cluster.parent.image_id, meta: cluster.parent.meta }]
+      .concat(cluster.members.map((m) => ({ id: m.image_id, meta: m.meta })));
+    const keeper = keeperId || cluster.parent.image_id;
+    const dupCount = items.length - 1;
     return e("div", { className: "pdc-cluster" },
-      e("div", { className: "pdc-parent" },
-        e("a", { href: `/images/${p.image_id}`, target: "_blank", rel: "noreferrer" },
-          e("img", { className: "pdc-thumb", loading: "lazy", src: `/image/${p.image_id}/thumbnail` })),
-        e("div", { className: "pdc-parent-meta" },
-          e("span", { className: "pdc-keep" }, "KEEP - largest"),
-          iLink(p.image_id, pm),
-          e("span", { className: "pdc-dur" }, px(pm))),
-        e("div", { className: "pdc-cluster-actions" },
-          e("span", { className: "pdc-count" }, `${cluster.members.length} dup${cluster.members.length === 1 ? "" : "s"}`),
-          e(Form.Check, { type: "checkbox", checked: allSel, label: "select all", onChange: () => onAll(cluster, !allSel) }))),
-      e("div", { className: "pdc-members" },
-        cluster.members.map((m) =>
-          e("label", { key: m.image_id, className: "pdc-member" + (selected.has(m.image_id) ? " pdc-sel" : "") },
-            e(Form.Check, { type: "checkbox", checked: selected.has(m.image_id), onChange: () => onToggle(m.image_id), className: "pdc-check" }),
-            iThumb(m.image_id, m.meta),
-            e("div", { className: "pdc-member-meta" },
-              e(Badge, { variant: "danger", bg: "danger" }, "near-duplicate"),
-              iLink(m.image_id, m.meta),
-              e("span", { className: "pdc-cov" }, px(m.meta)))))));
+      e("div", { className: "pdc-img-grid" },
+        items.map((it) => {
+          const isKeep = it.id === keeper;
+          return e("div", { key: it.id,
+            className: "pdc-img-item" + (isKeep ? " pdc-keep-item" : (selected.has(it.id) ? " pdc-sel" : "")) },
+            e("a", { href: `/images/${it.id}`, target: "_blank", rel: "noreferrer" },
+              e("img", { className: "pdc-img-tile", loading: "lazy", src: `/image/${it.id}/thumbnail`,
+                alt: (it.meta && it.meta.title) || `Image ${it.id}` })),
+            e("div", { className: "pdc-img-foot" },
+              isKeep
+                ? e(Badge, { variant: "success", bg: "success" }, "KEEP")
+                : e(React.Fragment, null,
+                    e(Form.Check, { type: "checkbox", checked: selected.has(it.id),
+                      onChange: () => onToggle(it.id), className: "pdc-check", title: "select for delete" }),
+                    e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn",
+                      onClick: () => onSetKeeper(ckey, it.id), title: "keep this one instead" }, "Keep")),
+              e("span", { className: "pdc-px" }, px(it.meta))));
+        })),
+      e("div", { className: "pdc-cluster-foot" },
+        e("span", { className: "pdc-count" }, `${dupCount} duplicate${dupCount === 1 ? "" : "s"} - keeping #${keeper}`),
+        e(Button, { size: "sm", variant: "danger", disabled: busy, onClick: () => onDeleteCluster(ckey, keeper) },
+          `Delete ${dupCount} dup${dupCount === 1 ? "" : "s"}`)));
   };
 
   // ---- main page --------------------------------------------------------- //
@@ -192,6 +198,7 @@
     const [status, setStatus] = React.useState(null);
     const [tab, setTab] = React.useState("ALL");
     const [selected, setSelected] = React.useState(() => new Set());
+    const [keepers, setKeepers] = React.useState(() => ({}));  // image cluster -> chosen keeper id
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [showHelp, setShowHelp] = React.useState(false);
@@ -300,6 +307,36 @@
       finally { setBusy(false); }
     };
 
+    const setKeeper = (ckey, id) => setKeepers((k) => Object.assign({}, k, { [ckey]: id }));
+    const afterImgDelete = async (r) => {
+      setSelected(new Set()); setKeepers({});
+      await loadImage();
+      if (r && r.failed && r.failed.length) setErr(`${r.failed.length} deletion(s) failed (see plugin log).`);
+    };
+    const imgDups = (c) => {
+      const k = keepers[c.parent.image_id] || c.parent.image_id;
+      return [c.parent.image_id].concat(c.members.map((m) => m.image_id)).filter((id) => id !== k);
+    };
+    const deleteImgCluster = async (ckey) => {
+      const c = iClusters.find((x) => x.parent.image_id === ckey);
+      if (!c) return;
+      const ids = imgDups(c);
+      if (!ids.length) return;
+      if (!window.confirm(`Delete ${ids.length} duplicate image file(s)? Keeps the one marked KEEP. Cannot be undone.`)) return;
+      setBusy(true); setErr(null);
+      try { const r = await run("delete_images", { image_ids: ids, delete_file: true }); await afterImgDelete(r); }
+      catch (ex) { setErr(ex.message || String(ex)); } finally { setBusy(false); }
+    };
+    const deleteAllImgDups = async () => {
+      const ids = iClusters.flatMap(imgDups);
+      if (!ids.length) return;
+      if (!window.confirm(`DELETE ${ids.length} duplicate images and their files from disk?\n` +
+        `This keeps ONE image per group (${iClusters.length} groups). This CANNOT be undone.`)) return;
+      setBusy(true); setErr(null);
+      try { const r = await run("delete_images", { image_ids: ids, delete_file: true }); await afterImgDelete(r); }
+      catch (ex) { setErr(ex.message || String(ex)); } finally { setBusy(false); }
+    };
+
     const running = status && status.running;
     const clusters = media === "image" ? iClusters
       : (tab === "ALL" ? vClusters : vClusters.filter((c) => c.members.some((m) => m.level === tab)));
@@ -354,7 +391,10 @@
               onChange: (ev) => setExcludeIds(ev.target.value), onBlur: applyExclude }),
             e(Form.Check, { type: "switch", id: "pdc-dry", className: "pdc-dry",
               checked: !dryRun, onChange: toggleDryRun,
-              label: dryRun ? "Galleries: dry-run (report only)" : "Galleries: WILL be created on next scan" })),
+              label: dryRun ? "Galleries: dry-run (report only)" : "Galleries: WILL be created on next scan" }),
+            (() => { const n = iClusters.reduce((a, c) => a + c.members.length, 0);
+              return n > 0 ? e(Button, { variant: "danger", size: "sm", disabled: busy, onClick: deleteAllImgDups },
+                `Delete all duplicates (${n})`) : null; })()),
       selected.size > 0
         ? e("div", { className: "pdc-delbar" },
             e("span", null, `${selected.size} selected`),
@@ -367,7 +407,9 @@
             : `No ${media} duplicates yet. Run a scan.`)
         : e("div", { className: "pdc-clusters" },
             media === "image"
-              ? clusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c, selected, onToggle: toggle, onAll: selAll }))
+              ? clusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c,
+                  keeperId: keepers[c.parent.image_id], selected, onToggle: toggle,
+                  onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
               : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c, selected, onToggle: toggle, onAll: selAll }))));
   };
 

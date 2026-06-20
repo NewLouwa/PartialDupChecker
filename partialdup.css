@@ -34,6 +34,40 @@
 .pdc-dry { margin: 0; }
 .pdc-exclude { max-width: 200px; display: inline-block; }
 
+/* image dup grid (pick the keeper, delete the rest) */
+.pdc-img-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: .5rem;
+  padding: .6rem .75rem;
+}
+.pdc-img-item {
+  border: 1px solid rgba(255, 255, 255, .1);
+  border-radius: .3rem;
+  overflow: hidden;
+  background: rgba(0, 0, 0, .2);
+}
+.pdc-img-item.pdc-keep-item { border-color: #3fb950; box-shadow: 0 0 0 1px #3fb950 inset; }
+.pdc-img-item.pdc-sel { border-color: #dc3545; }
+.pdc-img-tile {
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  object-fit: cover;
+  display: block;
+  background: rgba(0, 0, 0, .35);
+}
+.pdc-img-foot { display: flex; align-items: center; gap: .3rem; padding: .25rem .35rem; flex-wrap: wrap; }
+.pdc-keepbtn { padding: .05rem .35rem; font-size: .72rem; }
+.pdc-px { font-size: .68rem; opacity: .6; margin-left: auto; }
+.pdc-cluster-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  padding: .4rem .75rem;
+  border-top: 1px solid rgba(255, 255, 255, .08);
+}
+
 .pdc-help-btn { margin-left: auto; }
 .pdc-help {
   border: 1px solid rgba(255, 255, 255, .15);
