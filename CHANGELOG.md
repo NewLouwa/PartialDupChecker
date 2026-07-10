@@ -3,6 +3,23 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.0] - 2026-07-10
+
+### Added
+- **Videos: four keep modes.** A "Keep:" bar above the video groups picks the
+  keeper of every group at once: **Longest** (default), **Newest**, **Oldest**
+  (both by file date, fetched live from Stash - no re-scan needed), or
+  **Manual** (decide group by group). The per-row green **Keep** button still
+  works in every mode as a per-group override ("KEEP - your pick").
+- File date shown next to the duration on every row, so you can see what
+  Newest/Oldest will pick.
+- Safety net: the delete action re-checks the current keepers and never
+  deletes one, even if the selection got stale while switching modes.
+
+### Changed
+- Switching keep mode clears manual picks and the delete selection (keepers
+  are re-derived, so a stale selection could have pointed at a new keeper).
+
 ## [0.3.0] - 2026-07-10
 
 ### Added

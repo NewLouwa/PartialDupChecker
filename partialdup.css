@@ -28,7 +28,10 @@
 }
 
 .pdc-media { display: flex; gap: .4rem; margin-bottom: .75rem; }
-.pdc-tabs { display: flex; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.pdc-tabs { display: flex; gap: .4rem; margin-bottom: .5rem; flex-wrap: wrap; }
+.pdc-keepbar { display: flex; align-items: center; gap: .4rem; margin-bottom: 1rem; flex-wrap: wrap; }
+.pdc-keeplbl { font-size: .8rem; font-weight: 700; opacity: .8; margin-right: .2rem; }
+.pdc-keephint { font-size: .78rem; opacity: .6; margin-left: .4rem; }
 .pdc-tab { min-width: 5rem; }
 .pdc-imgbar { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; flex-wrap: wrap; }
 .pdc-dry { margin: 0; }

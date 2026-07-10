@@ -43,8 +43,11 @@
         "Click Scan - it runs in the background (also available in Settings > Tasks).",
         "Each box is one item to KEEP (by default the longest video / largest image) " +
           "with the duplicates below.",
+        "Videos: pick a keep mode - Longest, Newest or Oldest apply automatically to " +
+          "every group (Newest/Oldest use the file date); Manual lets you decide " +
+          "group by group.",
         "Not the copy you want? Click the green Keep button on any other row to keep " +
-          "that one instead - the previous keeper becomes selectable.",
+          "that one instead (works in every mode) - the previous keeper becomes selectable.",
         "Tick the ones to remove, click Delete, and confirm.",
       ]],
     ]},
@@ -93,6 +96,22 @@
       runPluginOperation(plugin_id: $id, args: $args)
     }
   `;
+  // File dates for the keep-newest/oldest modes; fetched live from Stash so no
+  // plugin re-scan is needed.
+  const SCENE_DATES = gql`
+    query PartialDup_SceneDates($ids: [Int!]) {
+      findScenes(scene_ids: $ids) {
+        scenes { id created_at files { mod_time } }
+      }
+    }
+  `;
+
+  const KEEP_MODES = [
+    { key: "LONGEST", label: "Longest" },
+    { key: "NEWEST", label: "Newest" },
+    { key: "OLDEST", label: "Oldest" },
+    { key: "MANUAL", label: "Manual" },
+  ];
 
   const navigateTo = (path) => {
     if (api.utils && typeof api.utils.navigate === "function") api.utils.navigate(path);
@@ -104,6 +123,7 @@
     return h ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
   };
   const basename = (p) => (p || "").replace(/\\/g, "/").split("/").pop();
+  const fmtDate = (ms) => ms ? new Date(ms).toLocaleDateString() : "";
 
   const sThumb = (id, meta) =>
     e("a", { href: `/scenes/${id}`, target: "_blank", rel: "noreferrer" },
@@ -123,7 +143,7 @@
       (meta && meta.title) || `Image ${id}`);
 
   // ---- video cluster card (pick the keeper, delete the rest) -------------- //
-  const VideoCard = ({ cluster, keeperId, selected, onToggle, onAll, onSetKeeper }) => {
+  const VideoCard = ({ cluster, keeperId, keepLabel, dates, selected, onToggle, onAll, onSetKeeper }) => {
     const p = cluster.parent || {};
     const ckey = p.scene_id;
     const items = [{ scene_id: p.scene_id, meta: p.meta, isParent: true }]
@@ -137,9 +157,11 @@
         e("a", { href: `/scenes/${keeper.scene_id}`, target: "_blank", rel: "noreferrer" },
           e("img", { className: "pdc-thumb", loading: "lazy", src: `/scene/${keeper.scene_id}/screenshot` })),
         e("div", { className: "pdc-parent-meta" },
-          e("span", { className: "pdc-keep" }, keeper.isParent ? "KEEP - longest" : "KEEP - your pick"),
+          e("span", { className: "pdc-keep" }, keepLabel),
           sLink(keeper.scene_id, km),
-          e("span", { className: "pdc-dur" }, km.duration ? fmtTime(km.duration) : "")),
+          e("span", { className: "pdc-dur" },
+            (km.duration ? fmtTime(km.duration) : "")
+            + (dates[keeper.scene_id] ? ` - ${fmtDate(dates[keeper.scene_id])}` : ""))),
         e("div", { className: "pdc-cluster-actions" },
           e("span", { className: "pdc-count" }, `${rows.length} match${rows.length === 1 ? "" : "es"}`),
           e(Form.Check, { type: "checkbox", checked: allSel, label: "select all", onChange: () => onAll(cluster, !allSel, keeper.scene_id) }))),
@@ -157,7 +179,9 @@
               e("div", { className: "pdc-member-top" },
                 e(Badge, { variant: lv.variant, bg: lv.variant }, lv.label),
                 e("span", { className: "pdc-conf" }, m.confidence != null ? `${Math.round(m.confidence * 100)}%` : ""),
-                e("span", { className: "pdc-dur" }, m.meta && m.meta.duration ? fmtTime(m.meta.duration) : "")),
+                e("span", { className: "pdc-dur" },
+                  (m.meta && m.meta.duration ? fmtTime(m.meta.duration) : "")
+                  + (dates[m.scene_id] ? ` - ${fmtDate(dates[m.scene_id])}` : ""))),
               sLink(m.scene_id, m.meta),
               e("span", { className: "pdc-cov" }, m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% matched${r}` : "")),
             e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
@@ -214,6 +238,8 @@
     const [selected, setSelected] = React.useState(() => new Set());
     const [keepers, setKeepers] = React.useState(() => ({}));  // image cluster -> chosen keeper id
     const [vKeepers, setVKeepers] = React.useState(() => ({})); // video cluster -> chosen keeper scene id
+    const [keepMode, setKeepMode] = React.useState("LONGEST"); // LONGEST | NEWEST | OLDEST | MANUAL
+    const [dates, setDates] = React.useState(() => ({}));      // scene id -> file date (epoch ms)
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [showHelp, setShowHelp] = React.useState(false);
@@ -227,10 +253,31 @@
       return resp && resp.data && resp.data.runPluginOperation;
     }, [client]);
 
+    const loadDates = React.useCallback(async (cs) => {
+      const ids = Array.from(new Set(cs.flatMap((c) =>
+        [c.parent.scene_id].concat(c.members.map((m) => m.scene_id))))).map(Number);
+      if (!ids.length) return;
+      try {
+        const r = await client.query({ query: SCENE_DATES, variables: { ids }, fetchPolicy: "no-cache" });
+        const map = {};
+        (((r.data || {}).findScenes || {}).scenes || []).forEach((s) => {
+          const f = (s.files && s.files[0]) || {};
+          const d = Date.parse(f.mod_time || s.created_at || "");
+          if (!isNaN(d)) map[Number(s.id)] = d;
+        });
+        if (aliveRef.current) setDates(map);
+      } catch (ex) { console.warn(`${LOG} scene dates unavailable`, ex); }
+    }, [client]);
     const loadVideo = React.useCallback(async () => {
-      try { const r = await run("clusters"); if (aliveRef.current) setVClusters((r && r.clusters) || []); }
+      try {
+        const r = await run("clusters");
+        if (!aliveRef.current) return;
+        const cs = (r && r.clusters) || [];
+        setVClusters(cs);
+        loadDates(cs);
+      }
       catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
-    }, [run]);
+    }, [run, loadDates]);
     const loadImage = React.useCallback(async () => {
       try {
         const r = await run("image_clusters");
@@ -308,9 +355,37 @@
       setVKeepers((k) => Object.assign({}, k, { [ckey]: id }));
       setSelected((p) => { const n = new Set(p); n.delete(id); return n; });
     };
+    // Which scene a video cluster keeps: a manual pick always wins, then the
+    // mode rule (newest/oldest by file date), then the parent (longest).
+    const keeperOf = (c) => {
+      const o = vKeepers[c.parent.scene_id];
+      if (o != null) return o;
+      if (keepMode === "NEWEST" || keepMode === "OLDEST") {
+        const dated = [c.parent.scene_id].concat(c.members.map((m) => m.scene_id))
+          .filter((id) => dates[id] != null);
+        if (dated.length)
+          return dated.reduce((a, b) =>
+            (keepMode === "NEWEST" ? dates[b] > dates[a] : dates[b] < dates[a]) ? b : a);
+      }
+      return c.parent.scene_id;
+    };
+    const keepLabelFor = (c) =>
+      vKeepers[c.parent.scene_id] != null ? "KEEP - your pick"
+        : keepMode === "NEWEST" ? "KEEP - newest"
+        : keepMode === "OLDEST" ? "KEEP - oldest"
+        : keepMode === "MANUAL" ? "KEEP - manual (default longest)"
+        : "KEEP - longest";
+    // Changing mode re-derives every keeper, so drop manual picks and the
+    // selection (an id selected for delete may have just become a keeper).
+    const switchKeepMode = (m) => { setKeepMode(m); setVKeepers({}); setSelected(new Set()); };
 
     const deleteSelected = async () => {
-      const ids = Array.from(selected);
+      let ids = Array.from(selected);
+      // Belt and braces: never delete a current keeper, whatever the selection says.
+      if (media === "video") {
+        const ks = new Set(vClusters.map(keeperOf));
+        ids = ids.filter((id) => !ks.has(id));
+      }
       if (!ids.length) return;
       const what = media === "image" ? "image" : "scene";
       if (!window.confirm(`Delete ${ids.length} ${what}(s) AND their files from disk?\nThe KEEP item in each box is preserved. This cannot be undone.`)) return;
@@ -415,8 +490,18 @@
         renderHelp()) : null,
       err ? e("div", { className: "pdc-error" }, `Error: ${err}`) : null,
       media === "video"
-        ? e("div", { className: "pdc-tabs" }, tabBtn("ALL", `All (${vTotal})`),
-            tabBtn("DUPLICATE", "Duplicate"), tabBtn("PART", "Part"), tabBtn("CUT", "Cut/Montage"))
+        ? e(React.Fragment, null,
+            e("div", { className: "pdc-tabs" }, tabBtn("ALL", `All (${vTotal})`),
+              tabBtn("DUPLICATE", "Duplicate"), tabBtn("PART", "Part"), tabBtn("CUT", "Cut/Montage")),
+            e("div", { className: "pdc-keepbar" },
+              e("span", { className: "pdc-keeplbl" }, "Keep:"),
+              KEEP_MODES.map((m) => e(Button, { key: m.key, size: "sm",
+                variant: keepMode === m.key ? "success" : "outline-secondary",
+                className: "pdc-tab", onClick: () => switchKeepMode(m.key) }, m.label)),
+              e("span", { className: "pdc-keephint" },
+                keepMode === "MANUAL" ? "pick the keeper with the Keep button on each row"
+                : keepMode === "LONGEST" ? "keeps the longest video of each group"
+                : `keeps the ${keepMode === "NEWEST" ? "most recent" : "oldest"} file of each group (file date)`)))
         : e("div", { className: "pdc-imgbar" },
             iSummary ? e("span", { className: "pdc-status" },
               `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
@@ -449,7 +534,7 @@
                   keeperId: keepers[c.parent.image_id], selected, onToggle: toggle,
                   onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
               : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
-                  keeperId: vKeepers[c.parent.scene_id], selected,
+                  keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, selected,
                   onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper }))));
   };
 
@@ -474,5 +559,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.3.0)`);
+  console.log(`${LOG} plugin loaded (v0.4.0)`);
 })();
