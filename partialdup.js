@@ -43,11 +43,11 @@
         "Click Scan - it runs in the background (also available in Settings > Tasks).",
         "Each box is one item to KEEP (by default the longest video / largest image) " +
           "with the duplicates below.",
-        "Videos: pick a keep mode - Longest, Newest or Oldest apply automatically to " +
-          "every group (Newest/Oldest use the scene's created date in Stash); Manual " +
-          "lets you decide group by group.",
-        "Not the copy you want? Click the green Keep button on any other row to keep " +
-          "that one instead (works in every mode) - the previous keeper becomes selectable.",
+        "Videos: pick a keep mode - Longest, Newest or Oldest protect one keeper per " +
+          "group automatically (Newest/Oldest use the scene's created date in Stash). " +
+          "Manual protects nothing: every file, the longest included, gets a checkbox.",
+        "In an auto mode, the green Keep button on any row overrides the rule for " +
+          "that group; Select all duplicates ticks every non-kept file of every group.",
         "Tick the ones to remove, click Delete, and confirm.",
       ]],
     ]},
@@ -65,8 +65,9 @@
         "to actually create them."],
     ]},
     { t: "Deleting", c: [
-      ["p", "The KEEP item is never selectable, so you can't delete the copy you're " +
-        "keeping. Use the Keep button to change which copy that is (videos and images). " +
+      ["p", "In the auto keep modes the KEEP item is never selectable, so you can't " +
+        "delete the copy you're keeping (use the Keep button to change which copy that " +
+        "is). In MANUAL mode nothing is protected - whatever you tick gets deleted. " +
         "Delete removes the selected items AND their files from disk - it cannot " +
         "be undone."],
     ]},
@@ -271,29 +272,43 @@
       title: (meta && meta.title) || `Image ${id}` },
       (meta && meta.title) || `Image ${id}`);
 
-  // ---- video cluster card (pick the keeper, delete the rest) -------------- //
-  const VideoCard = ({ cluster, keeperId, keepLabel, dates, selected, onToggle, onAll, onSetKeeper }) => {
+  // ---- video cluster card ------------------------------------------------- //
+  // Auto modes (Longest/Newest/Oldest): the keeper sits in the header, cannot
+  // be selected, and each row has a Keep override button. Manual mode: NO
+  // protected keeper - every file (the longest included) is a selectable row.
+  const VideoCard = ({ cluster, keeperId, keepLabel, dates, selected, onToggle, onAll, onSetKeeper, manual }) => {
     const p = cluster.parent || {};
     const ckey = p.scene_id;
     const items = [{ scene_id: p.scene_id, meta: p.meta, isParent: true }]
       .concat(cluster.members.map((m) => Object.assign({}, m, { isParent: false })));
-    const keeper = items.find((it) => it.scene_id === keeperId) || items[0];
-    const rows = items.filter((it) => it.scene_id !== keeper.scene_id);
-    const km = keeper.meta || {};
+    const keeper = manual ? null : (items.find((it) => it.scene_id === keeperId) || items[0]);
+    const rows = manual ? items : items.filter((it) => it.scene_id !== keeper.scene_id);
+    const km = keeper ? (keeper.meta || {}) : {};
     const allSel = rows.length > 0 && rows.every((it) => selected.has(it.scene_id));
+    const selectAll = e(Form.Check, { type: "checkbox", checked: allSel, label: "select all",
+      onChange: () => onAll(cluster, !allSel, keeper ? keeper.scene_id : null) });
     return e("div", { className: "pdc-cluster" },
-      e("div", { className: "pdc-parent" },
-        e("a", { href: `/scenes/${keeper.scene_id}`, target: "_blank", rel: "noreferrer" },
-          e("img", { className: "pdc-thumb", loading: "lazy", src: `/scene/${keeper.scene_id}/screenshot` })),
-        e("div", { className: "pdc-parent-meta" },
-          e("span", { className: "pdc-keep" }, keepLabel),
-          sLink(keeper.scene_id, km),
-          e("span", { className: "pdc-dur" },
-            (km.duration ? fmtTime(km.duration) : "")
-            + (dates[keeper.scene_id] ? ` - ${fmtDate(dates[keeper.scene_id])}` : ""))),
-        e("div", { className: "pdc-cluster-actions" },
-          e("span", { className: "pdc-count" }, `${rows.length} match${rows.length === 1 ? "" : "es"}`),
-          e(Form.Check, { type: "checkbox", checked: allSel, label: "select all", onChange: () => onAll(cluster, !allSel, keeper.scene_id) }))),
+      manual
+        ? e("div", { className: "pdc-parent pdc-parent-manual" },
+            e("div", { className: "pdc-parent-meta" },
+              e("span", { className: "pdc-keep pdc-keep-free" }, "MANUAL - free selection"),
+              e("span", { className: "pdc-dur" },
+                `${items.length} files - tick anything, the longest included`)),
+            e("div", { className: "pdc-cluster-actions" },
+              e("span", { className: "pdc-count" }, `${items.length} file${items.length === 1 ? "" : "s"}`),
+              selectAll))
+        : e("div", { className: "pdc-parent" },
+            e("a", { href: `/scenes/${keeper.scene_id}`, target: "_blank", rel: "noreferrer" },
+              e("img", { className: "pdc-thumb", loading: "lazy", src: `/scene/${keeper.scene_id}/screenshot` })),
+            e("div", { className: "pdc-parent-meta" },
+              e("span", { className: "pdc-keep" }, keepLabel),
+              sLink(keeper.scene_id, km),
+              e("span", { className: "pdc-dur" },
+                (km.duration ? fmtTime(km.duration) : "")
+                + (dates[keeper.scene_id] ? ` - ${fmtDate(dates[keeper.scene_id])}` : ""))),
+            e("div", { className: "pdc-cluster-actions" },
+              e("span", { className: "pdc-count" }, `${rows.length} match${rows.length === 1 ? "" : "es"}`),
+              selectAll)),
       e("div", { className: "pdc-members" },
         rows.map((m) => {
           const lv = m.isParent
@@ -313,7 +328,7 @@
                   + (dates[m.scene_id] ? ` - ${fmtDate(dates[m.scene_id])}` : ""))),
               sLink(m.scene_id, m.meta),
               e("span", { className: "pdc-cov" }, m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% matched${r}` : "")),
-            e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
+            manual ? e("span", null) : e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
               title: "keep this one instead",
               onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onSetKeeper(ckey, m.scene_id); } }, "Keep"));
         })));
@@ -522,9 +537,11 @@
       setVKeepers((k) => Object.assign({}, k, { [ckey]: id }));
       setSelected((p) => { const n = new Set(p); n.delete(id); return n; });
     };
-    // Which scene a video cluster keeps: a manual pick always wins, then the
-    // mode rule (newest/oldest by file date), then the parent (longest).
+    // Which scene a video cluster keeps. MANUAL protects nothing (free
+    // selection, returns null); otherwise a per-group Keep pick wins, then the
+    // mode rule (newest/oldest by created date), then the parent (longest).
     const keeperOf = (c) => {
+      if (keepMode === "MANUAL") return null;
       const o = vKeepers[c.parent.scene_id];
       if (o != null) return o;
       if (keepMode === "NEWEST" || keepMode === "OLDEST") {
@@ -545,6 +562,17 @@
     // Changing mode re-derives every keeper, so drop manual picks and the
     // selection (an id selected for delete may have just become a keeper).
     const switchKeepMode = (m) => { setKeepMode(m); setVKeepers({}); setSelected(new Set()); };
+    // Global select-all: ticks every non-keeper of every group at once,
+    // following the active keep mode. Not offered in MANUAL (no keeper rule).
+    const dupIdsOf = (c) => {
+      const k = keeperOf(c);
+      return [c.parent.scene_id].concat(c.members.map((m) => m.scene_id)).filter((id) => id !== k);
+    };
+    const selectAllDups = (cs) => setSelected((p) => {
+      const n = new Set(p);
+      cs.forEach((c) => dupIdsOf(c).forEach((id) => n.add(id)));
+      return n;
+    });
 
     const deleteSelected = async () => {
       let ids = Array.from(selected);
@@ -555,7 +583,10 @@
       }
       if (!ids.length) return;
       const what = media === "image" ? "image" : "scene";
-      if (!window.confirm(`Delete ${ids.length} ${what}(s) AND their files from disk?\nThe KEEP item in each box is preserved. This cannot be undone.`)) return;
+      const keepNote = media === "video" && keepMode === "MANUAL"
+        ? "MANUAL mode: exactly what you ticked will be deleted."
+        : "The KEEP item in each box is preserved.";
+      if (!window.confirm(`Delete ${ids.length} ${what}(s) AND their files from disk?\n${keepNote} This cannot be undone.`)) return;
       setBusy(true); setErr(null);
       try {
         const r = media === "image"
@@ -715,9 +746,16 @@
                 variant: keepMode === m.key ? "success" : "outline-secondary",
                 className: "pdc-tab", onClick: () => switchKeepMode(m.key) }, m.label)),
               e("span", { className: "pdc-keephint" },
-                keepMode === "MANUAL" ? "pick the keeper with the Keep button on each row"
+                keepMode === "MANUAL" ? "free selection: tick anything in every group, the longest included"
                 : keepMode === "LONGEST" ? "keeps the longest video of each group"
-                : `keeps the ${keepMode === "NEWEST" ? "most recently" : "earliest"} added file of each group (created date)`)))
+                : `keeps the ${keepMode === "NEWEST" ? "most recently" : "earliest"} added file of each group (created date)`),
+              keepMode !== "MANUAL" ? (() => {
+                const n = clusters.reduce((a, c) => a + dupIdsOf(c).length, 0);
+                return n > 0 ? e(Button, { size: "sm", variant: "outline-danger", className: "pdc-selall",
+                  onClick: () => selectAllDups(clusters),
+                  title: "tick every non-kept file of every group, following the keep mode" },
+                  `Select all duplicates (${n})`) : null;
+              })() : null))
         : e("div", { className: "pdc-imgbar" },
             iSummary ? e("span", { className: "pdc-status" },
               `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
@@ -751,6 +789,7 @@
                   onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
               : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
                   keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, selected,
+                  manual: keepMode === "MANUAL",
                   onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper }))));
   };
 
@@ -777,5 +816,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.8.0)`);
+  console.log(`${LOG} plugin loaded (v0.9.0)`);
 })();

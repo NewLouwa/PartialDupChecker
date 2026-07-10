@@ -3,6 +3,21 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.9.0] - 2026-07-10
+
+### Changed
+- **Manual mode is now true free selection**: no protected keeper - every
+  file of every group, the longest included, gets a checkbox (this is what
+  Manual was always meant to be). The group header shows "MANUAL - free
+  selection" and per-row Keep buttons are hidden in this mode. The delete
+  confirmation says exactly what will happen.
+
+### Added
+- **"Select all duplicates (N)" button** in the Keep bar: one click ticks
+  every non-kept file of every visible group, following the active keep
+  mode (Longest/Newest/Oldest, including per-group Keep overrides). Not
+  shown in Manual mode, which has no keeper rule.
+
 ## [0.8.0] - 2026-07-10
 
 ### Added
