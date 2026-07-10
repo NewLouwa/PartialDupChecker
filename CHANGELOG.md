@@ -3,6 +3,14 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] - 2026-07-10
+
+### Added
+- **Navbar display option** (Settings > "Navbar (this browser)"): show the
+  plugin as the full menu entry (icon + "Partial Dup"), as the right-side
+  shortcut icon, or both (default). Stored per browser in localStorage;
+  applies on the next navigation or page reload.
+
 ## [0.5.1] - 2026-07-10
 
 ### Changed

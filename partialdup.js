@@ -74,7 +74,8 @@
       ["p", "The Settings button (toolbar) exposes the backend tunables: scan mode " +
         "(hybrid/fast/deep), sampling interval, match thresholds per level, performance " +
         "caps, ffmpeg paths and image/gallery knobs. Changes apply to the NEXT scan. " +
-        "Reset defaults restores everything."],
+        "Reset defaults restores everything. The Navbar option (per browser) picks how " +
+        "the plugin shows in the top bar: menu entry, right-side icon, or both."],
     ]},
     { t: "FAQ", c: [
       ["dl", [
@@ -153,6 +154,24 @@
     { g: "Images", k: "gallery_prefix", label: "Gallery title prefix", type: "text" },
     { g: "Images", k: "gallery_max_create", label: "Max galleries created per scan", type: "int", min: 1, max: 10000 },
   ];
+
+  // Navbar display preference - per-browser (localStorage), read on every
+  // navbar render so a change applies on the next navigation/reload.
+  const NAV_PREF_KEY = "pdc_nav_display";
+  const NAV_PREFS = [
+    ["both", "Menu entry + right-side icon"],
+    ["menu", "Menu entry only (icon + name)"],
+    ["icon", "Right-side icon only"],
+  ];
+  const getNavPref = () => {
+    try {
+      const v = window.localStorage.getItem(NAV_PREF_KEY);
+      return NAV_PREFS.some((p) => p[0] === v) ? v : "both";
+    } catch (ex) { return "both"; }
+  };
+  const setNavPrefStored = (v) => {
+    try { window.localStorage.setItem(NAV_PREF_KEY, v); } catch (ex) { /* private mode */ }
+  };
 
   const navigateTo = (path) => {
     if (api.utils && typeof api.utils.navigate === "function") api.utils.navigate(path);
@@ -288,6 +307,7 @@
     const [cfg, setCfg] = React.useState(null);        // full backend config
     const [draft, setDraft] = React.useState(() => ({})); // unsaved field edits
     const [cfgMsg, setCfgMsg] = React.useState(null);  // transient "Saved" note
+    const [navPref, setNavPref] = React.useState(getNavPref);
     const aliveRef = React.useRef(true);
     const mediaRef = React.useRef(media);
     mediaRef.current = media;
@@ -582,6 +602,16 @@
                 onClick: saveSettings }, "Save"),
               e(Button, { size: "sm", variant: "outline-warning", onClick: resetSettings }, "Reset defaults"),
               e(Button, { size: "sm", variant: "outline-secondary", onClick: () => setShowSettings(false) }, "Close"))),
+          e("section", { className: "pdc-set-sec" },
+            e("h4", null, "Navbar (this browser)"),
+            e("div", { className: "pdc-set-grid" },
+              e("label", { className: "pdc-set-field" },
+                e("span", { className: "pdc-set-lbl" }, "Show the plugin in the top bar as"),
+                e(Form.Control, { as: "select", size: "sm", value: navPref,
+                  onChange: (ev) => { setNavPref(ev.target.value); setNavPrefStored(ev.target.value); } },
+                  NAV_PREFS.map((p) => e("option", { key: p[0], value: p[0] }, p[1]))),
+                e("span", { className: "pdc-set-help" },
+                  "saved in this browser only; applies on the next navigation or reload")))),
           cfg == null ? e("p", null, "Loading config...")
             : groups.map((g) => e("section", { key: g, className: "pdc-set-sec" },
                 e("h4", null, g),
@@ -660,11 +690,13 @@
   catch (ex) { console.error(`${LOG} register.route failed`, ex); }
   try {
     api.patch.before("MainNavBar.UtilityItems", function (props) {
+      if (getNavPref() === "menu") return [{ children: props.children }];
       return [{ children: e(React.Fragment, null, props.children, e(NavButton, null)) }];
     });
   } catch (ex) { console.error(`${LOG} navbar patch failed`, ex); }
   try {
     api.patch.before("MainNavBar.MenuItems", function (props) {
+      if (getNavPref() === "icon") return [{ children: props.children }];
       const link = e("div", { key: "pdc-menu", className: "nav-link pdc-menu-link", role: "button",
         onClick: () => navigateTo(ROUTE), title: "Partial Duplicate Checker" },
         e(Icon, { icon: FA.faClone }), e("span", { className: "pdc-menu-label" }, "Partial Dup"));
@@ -672,5 +704,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.5.1)`);
+  console.log(`${LOG} plugin loaded (v0.6.0)`);
 })();
