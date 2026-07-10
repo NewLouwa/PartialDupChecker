@@ -9,9 +9,9 @@ community plugins - instead of copying files by hand.
 The built package is published on this repo's `source` branch. In Stash,
 Settings > Plugins > **Available Plugins** > **Add Source**:
 
-- Name: `CyzLab`
+- Name: `PartialDup`
 - Source URL: `https://raw.githubusercontent.com/NewLouwa/PartialDupChecker/source/index.yml`
-- Local path: `cyzlab`
+- Local path: `partialdup`
 
 Do NOT use the repo page or any other GitHub URL as the source - Stash needs the
 raw `index.yml` above, anything else fails with a YAML parse error
@@ -67,9 +67,9 @@ Stash sources are HTTP(S) URLs. Pick one:
 
 Settings > Plugins > **Available Plugins** > **Add Source**:
 
-- Name: `CyzLab`
+- Name: `PartialDup`
 - Source URL: the `index.yml` URL from step 2
-- Local path: `cyzlab` (any label)
+- Local path: `partialdup` (any label)
 
 Then find "Partial Duplicate Checker" under that source and click Install. Updates
 appear there whenever you rebuild + re-host with a newer build stamp.

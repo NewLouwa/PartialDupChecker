@@ -34,9 +34,9 @@ In Stash: **Settings ▸ Plugins ▸ Available Plugins ▸ Add Source**, then en
 
 | Field | Value |
 |---|---|
-| Name | `CyzLab` |
+| Name | `PartialDup` |
 | Source URL | `https://raw.githubusercontent.com/NewLouwa/PartialDupChecker/source/index.yml` |
-| Local Path | `cyzlab` |
+| Local Path | `partialdup` |
 
 Then tick **Partial Duplicate Checker** under the new source and click **Install**.
 Updates show up in **Installed Plugins** whenever a new build is published.
