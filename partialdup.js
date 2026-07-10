@@ -74,9 +74,10 @@
       ["p", "Two places, split by purpose. The Settings button here (toolbar) holds the " +
         "video-scan tunables; changes apply to the NEXT scan and Reset defaults restores " +
         "everything. Stash's Settings > Plugins page holds the FFmpeg paths and the " +
-        "image/gallery thresholds - a value set there wins over the panel. The Navbar " +
-        "option (per browser) picks how the plugin shows in the top bar. Gallery " +
-        "dry-run/skip toggles act immediately from the Images toolbar."],
+        "image/gallery thresholds - a value set there wins over the panel - plus the " +
+        "server-wide 'Top bar access' choice (both/menu/icon); the Navbar option in the " +
+        "panel here can override it per browser. Gallery dry-run/skip toggles act " +
+        "immediately from the Images toolbar."],
     ]},
     { t: "Settings - video scan", c: [
       ["dl", [
@@ -119,6 +120,9 @@
     ]},
     { t: "Settings - Stash plugin page (FFmpeg + Images)", c: [
       ["dl", [
+        ["Top bar access", "'both' shows the menu entry AND the right-side shortcut " +
+          "icon, 'menu' only the menu entry, 'icon' only the shortcut. Server-wide " +
+          "default for every browser; reload after changing."],
         ["ffmpeg / ffprobe path", "Leave empty to use PATH (or PDC_FFMPEG/PDC_FFPROBE " +
           "env). Set a full path if Stash's container/host has them elsewhere."],
         ["Per-video decode timeout", "Kills a decode stuck on a corrupt file. Default 600s."],
@@ -199,22 +203,43 @@
     { g: "Performance limits", k: "max_deep_seconds", label: "Hybrid: deep time budget (s)", type: "int", min: 10, max: 86400 },
   ];
 
-  // Navbar display preference - per-browser (localStorage), read on every
-  // navbar render so a change applies on the next navigation/reload.
+  // Navbar display preference. Resolution order: per-browser localStorage
+  // override > server-wide `nav_display` plugin setting (Settings > Plugins)
+  // > "both". Read on every navbar render so a change applies on the next
+  // navigation/reload.
   const NAV_PREF_KEY = "pdc_nav_display";
   const NAV_PREFS = [
     ["both", "Menu entry + right-side icon"],
     ["menu", "Menu entry only (icon + name)"],
     ["icon", "Right-side icon only"],
   ];
+  const isNavPref = (v) => NAV_PREFS.some((p) => p[0] === v);
+  let navPrefServer = null;
+  try {
+    window.fetch("/graphql", {
+      method: "POST", credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: "{ configuration { plugins } }" }),
+    }).then((r) => r.json()).then((j) => {
+      const p = j && j.data && j.data.configuration && j.data.configuration.plugins;
+      const v = p && p[PLUGIN_ID] && p[PLUGIN_ID].nav_display;
+      if (typeof v === "string" && isNavPref(v.trim().toLowerCase()))
+        navPrefServer = v.trim().toLowerCase();
+    }).catch(() => { /* not critical */ });
+  } catch (ex) { /* not critical */ }
+  const getNavPrefLocal = () => {
+    try { return window.localStorage.getItem(NAV_PREF_KEY) || ""; } catch (ex) { return ""; }
+  };
   const getNavPref = () => {
-    try {
-      const v = window.localStorage.getItem(NAV_PREF_KEY);
-      return NAV_PREFS.some((p) => p[0] === v) ? v : "both";
-    } catch (ex) { return "both"; }
+    const local = getNavPrefLocal();
+    if (isNavPref(local)) return local;
+    return navPrefServer || "both";
   };
   const setNavPrefStored = (v) => {
-    try { window.localStorage.setItem(NAV_PREF_KEY, v); } catch (ex) { /* private mode */ }
+    try {
+      if (v) window.localStorage.setItem(NAV_PREF_KEY, v);
+      else window.localStorage.removeItem(NAV_PREF_KEY);
+    } catch (ex) { /* private mode */ }
   };
 
   const navigateTo = (path) => {
@@ -351,7 +376,7 @@
     const [cfg, setCfg] = React.useState(null);        // full backend config
     const [draft, setDraft] = React.useState(() => ({})); // unsaved field edits
     const [cfgMsg, setCfgMsg] = React.useState(null);  // transient "Saved" note
-    const [navPref, setNavPref] = React.useState(getNavPref);
+    const [navPref, setNavPref] = React.useState(getNavPrefLocal);
     const aliveRef = React.useRef(true);
     const mediaRef = React.useRef(media);
     mediaRef.current = media;
@@ -651,11 +676,13 @@
             e("div", { className: "pdc-set-grid" },
               e("label", { className: "pdc-set-field" },
                 e("span", { className: "pdc-set-lbl" }, "Show the plugin in the top bar as"),
-                e(Form.Control, { as: "select", size: "sm", value: navPref,
+                e(Form.Control, { as: "select", size: "sm", value: isNavPref(navPref) ? navPref : "",
                   onChange: (ev) => { setNavPref(ev.target.value); setNavPrefStored(ev.target.value); } },
+                  e("option", { value: "" },
+                    `Follow Settings > Plugins${navPrefServer ? ` (currently: ${navPrefServer})` : " (not set = both)"}`),
                   NAV_PREFS.map((p) => e("option", { key: p[0], value: p[0] }, p[1]))),
                 e("span", { className: "pdc-set-help" },
-                  "saved in this browser only; applies on the next navigation or reload")))),
+                  "browser override of the server-wide 'Top bar access' setting; applies on the next navigation or reload")))),
           cfg == null ? e("p", null, "Loading config...")
             : groups.map((g) => e("section", { key: g, className: "pdc-set-sec" },
                 e("h4", null, g),
@@ -750,5 +777,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.7.0)`);
+  console.log(`${LOG} plugin loaded (v0.8.0)`);
 })();

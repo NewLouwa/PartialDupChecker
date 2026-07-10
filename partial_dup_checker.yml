@@ -1,6 +1,6 @@
 name: Partial Duplicate Checker
 description: Finds duplicates Stash's whole-file phash misses - partial video matches (cuts, parts, montages) and near-duplicate images, plus auto-collecting similar images into galleries. Complements the built-in duplicate checker; never mutates the library unless you opt in.
-version: 0.7.0
+version: 0.8.0
 ui:
   javascript:
     - partialdup.js
@@ -17,6 +17,10 @@ interface: raw
 # the video-scan tunables live in the plugin page's own Settings panel.
 # A value set here wins over the same key saved from the in-page panel.
 settings:
+  nav_display:
+    displayName: Top bar access
+    description: "Where the plugin shows in the top bar, for every browser: 'both' = menu entry + right-side shortcut icon, 'menu' = menu entry only, 'icon' = right-side icon only. The per-browser choice in the plugin page's Settings panel overrides this. Reload the page after changing."
+    type: STRING
   ffmpeg_path:
     displayName: ffmpeg path
     description: "Full path to ffmpeg. Leave empty to use PATH (or PDC_FFMPEG env)."
