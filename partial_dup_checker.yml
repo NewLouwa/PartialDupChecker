@@ -1,6 +1,6 @@
 name: Partial Duplicate Checker
 description: Finds duplicates Stash's whole-file phash misses - partial video matches (cuts, parts, montages) and near-duplicate images, plus auto-collecting similar images into galleries. Complements the built-in duplicate checker; never mutates the library unless you opt in.
-version: 0.5.0
+version: 0.5.1
 ui:
   javascript:
     - partialdup.js

@@ -3,6 +3,13 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] - 2026-07-10
+
+### Changed
+- Keep Newest/Oldest now rank by the scene's **created date** in Stash
+  (`created_at`), not the file modification time; `mod_time` remains only a
+  fallback when `created_at` is missing.
+
 ## [0.5.0] - 2026-07-10
 
 ### Added

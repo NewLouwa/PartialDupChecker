@@ -44,8 +44,8 @@
         "Each box is one item to KEEP (by default the longest video / largest image) " +
           "with the duplicates below.",
         "Videos: pick a keep mode - Longest, Newest or Oldest apply automatically to " +
-          "every group (Newest/Oldest use the file date); Manual lets you decide " +
-          "group by group.",
+          "every group (Newest/Oldest use the scene's created date in Stash); Manual " +
+          "lets you decide group by group.",
         "Not the copy you want? Click the green Keep button on any other row to keep " +
           "that one instead (works in every mode) - the previous keeper becomes selectable.",
         "Tick the ones to remove, click Delete, and confirm.",
@@ -102,8 +102,9 @@
       runPluginOperation(plugin_id: $id, args: $args)
     }
   `;
-  // File dates for the keep-newest/oldest modes; fetched live from Stash so no
-  // plugin re-scan is needed.
+  // Scene dates for the keep-newest/oldest modes (created_at, i.e. when the
+  // scene was added to Stash; file mod_time only as fallback). Fetched live
+  // from Stash so no plugin re-scan is needed.
   const SCENE_DATES = gql`
     query PartialDup_SceneDates($ids: [Int!]) {
       findScenes(scene_ids: $ids) {
@@ -306,7 +307,7 @@
         const map = {};
         (((r.data || {}).findScenes || {}).scenes || []).forEach((s) => {
           const f = (s.files && s.files[0]) || {};
-          const d = Date.parse(f.mod_time || s.created_at || "");
+          const d = Date.parse(s.created_at || f.mod_time || "");
           if (!isNaN(d)) map[Number(s.id)] = d;
         });
         if (aliveRef.current) setDates(map);
@@ -613,7 +614,7 @@
               e("span", { className: "pdc-keephint" },
                 keepMode === "MANUAL" ? "pick the keeper with the Keep button on each row"
                 : keepMode === "LONGEST" ? "keeps the longest video of each group"
-                : `keeps the ${keepMode === "NEWEST" ? "most recent" : "oldest"} file of each group (file date)`)))
+                : `keeps the ${keepMode === "NEWEST" ? "most recently" : "earliest"} added file of each group (created date)`)))
         : e("div", { className: "pdc-imgbar" },
             iSummary ? e("span", { className: "pdc-status" },
               `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
@@ -671,5 +672,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.5.0)`);
+  console.log(`${LOG} plugin loaded (v0.5.1)`);
 })();

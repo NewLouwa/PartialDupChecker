@@ -84,8 +84,8 @@ Open **Partial Dup** from the main nav menu (or the navbar icon), then:
    by default the longest video / largest image. Filter videos by tab:
    **All / Duplicate / Part / Cut-Montage**.
 3. **Videos: pick a keep mode.** The **Keep:** bar applies a rule to every
-   group at once — **Longest** (default), **Newest** or **Oldest** (by file
-   date), or **Manual** to decide group by group.
+   group at once — **Longest** (default), **Newest** or **Oldest** (by the
+   scene's created date in Stash), or **Manual** to decide group by group.
 4. **Not the copy you want?** Click the green **Keep** button on any other row
    (works in every mode) — it becomes the keeper, and the previous one drops
    into the list where it can be selected like any other match.
