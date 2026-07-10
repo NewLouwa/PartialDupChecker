@@ -14,8 +14,12 @@ STAMP="$(date '+%Y%m%d-%H%M%S')"
 rm -rf dist
 mkdir -p dist
 
-FILES="partial_dup_checker.yml manifest partialdup.py partialdup.js partialdup.css README.md HELP.md"
-[ -d _vendor ] && FILES="$FILES _vendor"
+# NOTE: never ship a `manifest` file in the zip - Stash's package manager writes
+# its own manifest into the install dir to track the package; shipping one breaks
+# the install. _vendor is bundled only when SLIM is unset (the prod image already
+# has numpy/Pillow, so a slim zip is the default source build).
+FILES="partial_dup_checker.yml partialdup.py partialdup.js partialdup.css README.md HELP.md"
+[ -z "${SLIM:-}" ] && [ -d _vendor ] && FILES="$FILES _vendor"
 
 # zip with files at the archive root (Stash extracts into plugins/<id>/)
 ( zip -r -q dist/partial_dup_checker.zip $FILES )
