@@ -1353,6 +1353,16 @@ def action_get_config(args):
         conn.close()
 
 
+def action_reset_config(args):
+    """Drop every saved override and return the defaults."""
+    conn = _connect()
+    try:
+        _meta_set(conn, "config", {})
+        return _get_config(conn)
+    finally:
+        conn.close()
+
+
 def action_set_config(args):
     """Persist config overrides. Accepts a subset of DEFAULT_CONFIG keys."""
     updates = args.get("config") or {}
@@ -1924,6 +1934,7 @@ ACTIONS = {
     "task_scan_images": action_task_scan_images,
     "get_config": action_get_config,
     "set_config": action_set_config,
+    "reset_config": action_reset_config,
     "scan": action_scan,
     "scan_status": action_scan_status,
     "results": action_results,

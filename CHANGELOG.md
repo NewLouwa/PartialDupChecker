@@ -3,6 +3,20 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] - 2026-07-10
+
+### Added
+- **Settings panel** (toolbar button) exposing the backend tunables that were
+  previously reachable only via the `set_config` API: scan mode
+  (hybrid / fast / deep), deep sampling interval, minimum match length,
+  segment similarity, per-level match thresholds (Duplicate / Part / Cut),
+  performance caps (candidates, deep budgets), ffmpeg/ffprobe paths and
+  timeout, and the image/gallery knobs (hamming thresholds, min cluster
+  size, gallery prefix, max created per scan). Changes apply to the next
+  scan; a note in the panel says so.
+- **Reset defaults** button backed by a new `reset_config` plugin action
+  (drops every saved override), with a unit test.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added

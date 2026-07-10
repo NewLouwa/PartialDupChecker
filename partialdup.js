@@ -70,6 +70,12 @@
         "Delete removes the selected items AND their files from disk - it cannot " +
         "be undone."],
     ]},
+    { t: "Settings", c: [
+      ["p", "The Settings button (toolbar) exposes the backend tunables: scan mode " +
+        "(hybrid/fast/deep), sampling interval, match thresholds per level, performance " +
+        "caps, ffmpeg paths and image/gallery knobs. Changes apply to the NEXT scan. " +
+        "Reset defaults restores everything."],
+    ]},
     { t: "FAQ", c: [
       ["dl", [
         ["Does it change my library?", "No. Scanning only reads. Deletes happen only when you click them."],
@@ -111,6 +117,40 @@
     { key: "NEWEST", label: "Newest" },
     { key: "OLDEST", label: "Oldest" },
     { key: "MANUAL", label: "Manual" },
+  ];
+
+  // Backend tunables exposed in the Settings panel. Keys must exist in the
+  // plugin's DEFAULT_CONFIG (set_config rejects unknown keys).
+  const CFG_FIELDS = [
+    { g: "Video scan", k: "mode", label: "Scan mode", type: "select", opts: [
+        ["hybrid", "Hybrid - sprites shortlist, ffmpeg confirms (recommended)"],
+        ["fast", "Fast - sprite thumbnails only (~30s granularity)"],
+        ["deep", "Deep - ffmpeg-decode every scene (slow, most accurate)"]] },
+    { g: "Video scan", k: "deep_interval_s", label: "Deep sampling interval (s)", type: "number", min: 0.5, max: 30, step: 0.5,
+      help: "ffmpeg sampling cadence; lower = finer matches, slower scan" },
+    { g: "Video scan", k: "min_match_seconds", label: "Min match length (s)", type: "number", min: 0, max: 300, step: 1,
+      help: "reject matches whose longest shared run is shorter than this" },
+    { g: "Video scan", k: "segment_hamming", label: "Segment similarity (hamming 0-16)", type: "int", min: 0, max: 16,
+      help: "lower = stricter frame matching, fewer coincidences" },
+    { g: "Match thresholds (0-1)", k: "dup_min_coverage", label: "Duplicate: min coverage", type: "number", min: 0, max: 1, step: 0.01 },
+    { g: "Match thresholds (0-1)", k: "part_min_coverage", label: "Part: min contiguous coverage", type: "number", min: 0, max: 1, step: 0.01 },
+    { g: "Match thresholds (0-1)", k: "cut_min_coverage", label: "Cut/Montage: min total coverage", type: "number", min: 0, max: 1, step: 0.01 },
+    { g: "Performance limits", k: "min_candidate_segs", label: "Min shared segments to shortlist", type: "int", min: 1, max: 100 },
+    { g: "Performance limits", k: "top_k_candidates", label: "Candidates per scene (top-K)", type: "int", min: 1, max: 1000 },
+    { g: "Performance limits", k: "max_candidate_pairs", label: "Max candidate pairs", type: "int", min: 100, max: 10000000 },
+    { g: "Performance limits", k: "max_deep_scenes", label: "Hybrid: max deep scenes", type: "int", min: 1, max: 100000 },
+    { g: "Performance limits", k: "max_deep_pairs", label: "Hybrid: max deep pairs", type: "int", min: 1, max: 1000000 },
+    { g: "Performance limits", k: "max_deep_seconds", label: "Hybrid: deep time budget (s)", type: "int", min: 10, max: 86400 },
+    { g: "FFmpeg", k: "ffmpeg_path", label: "ffmpeg path (empty = PATH)", type: "text" },
+    { g: "FFmpeg", k: "ffprobe_path", label: "ffprobe path (empty = PATH)", type: "text" },
+    { g: "FFmpeg", k: "ffmpeg_timeout_s", label: "Per-video decode timeout (s)", type: "int", min: 30, max: 86400 },
+    { g: "Images", k: "image_dup_hamming", label: "Duplicate threshold (hamming)", type: "int", min: 0, max: 16,
+      help: "distance <= this = duplicate (keep one)" },
+    { g: "Images", k: "image_neighbour_hamming", label: "Similar threshold (hamming)", type: "int", min: 0, max: 24,
+      help: "between dup and this = similar (gallery cluster)" },
+    { g: "Images", k: "image_min_cluster", label: "Min images per similar cluster", type: "int", min: 2, max: 100 },
+    { g: "Images", k: "gallery_prefix", label: "Gallery title prefix", type: "text" },
+    { g: "Images", k: "gallery_max_create", label: "Max galleries created per scan", type: "int", min: 1, max: 10000 },
   ];
 
   const navigateTo = (path) => {
@@ -243,6 +283,10 @@
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [showHelp, setShowHelp] = React.useState(false);
+    const [showSettings, setShowSettings] = React.useState(false);
+    const [cfg, setCfg] = React.useState(null);        // full backend config
+    const [draft, setDraft] = React.useState(() => ({})); // unsaved field edits
+    const [cfgMsg, setCfgMsg] = React.useState(null);  // transient "Saved" note
     const aliveRef = React.useRef(true);
     const mediaRef = React.useRef(media);
     mediaRef.current = media;
@@ -288,15 +332,19 @@
       } catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run]);
 
+    const applyConfig = React.useCallback((c) => {
+      if (!c) return;
+      setCfg(c);
+      if (typeof c.gallery_dry_run === "boolean") setDryRun(c.gallery_dry_run);
+      if (typeof c.gallery_skip_in_gallery === "boolean") setSkipGal(c.gallery_skip_in_gallery);
+      setExcludeIds((c.gallery_exclude_ids || []).join(","));
+    }, []);
     const loadConfig = React.useCallback(async () => {
       try {
         const c = await run("get_config");
-        if (!aliveRef.current || !c) return;
-        if (typeof c.gallery_dry_run === "boolean") setDryRun(c.gallery_dry_run);
-        if (typeof c.gallery_skip_in_gallery === "boolean") setSkipGal(c.gallery_skip_in_gallery);
-        setExcludeIds((c.gallery_exclude_ids || []).join(","));
+        if (aliveRef.current) applyConfig(c);
       } catch (ex) { /* non-fatal */ }
-    }, [run]);
+    }, [run, applyConfig]);
 
     React.useEffect(() => {
       aliveRef.current = true;
@@ -340,6 +388,35 @@
       const ids = excludeIds.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
       try { await run("set_config", { config: { gallery_exclude_ids: ids } }); setExcludeIds(ids.join(",")); }
       catch (ex) { setErr(ex.message || String(ex)); }
+    };
+
+    const saveSettings = async () => {
+      const updates = {};
+      for (const f of CFG_FIELDS) {
+        if (!(f.k in draft)) continue;
+        let v = draft[f.k];
+        if (f.type === "number") { v = parseFloat(v); if (isNaN(v)) continue; }
+        else if (f.type === "int") { v = parseInt(v, 10); if (isNaN(v)) continue; }
+        if (f.min != null && v < f.min) v = f.min;
+        if (f.max != null && v > f.max) v = f.max;
+        updates[f.k] = v;
+      }
+      if (!Object.keys(updates).length) { setCfgMsg("Nothing to save"); return; }
+      setErr(null);
+      try {
+        const c = await run("set_config", { config: updates });
+        applyConfig(c); setDraft({});
+        setCfgMsg("Saved - applies to the next scan");
+      } catch (ex) { setErr(ex.message || String(ex)); }
+    };
+    const resetSettings = async () => {
+      if (!window.confirm("Reset ALL plugin settings to their defaults?")) return;
+      setErr(null);
+      try {
+        const c = await run("reset_config");
+        applyConfig(c); setDraft({});
+        setCfgMsg("Defaults restored");
+      } catch (ex) { setErr(ex.message || String(ex)); }
     };
 
     const toggle = (id) => setSelected((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
@@ -482,12 +559,47 @@
         progress,
         (status && status.running && status.worker_alive === false)
           ? e(Button, { size: "sm", variant: "warning", onClick: resetScan }, "Reset stuck scan") : null,
-        e(Button, { size: "sm", variant: showHelp ? "info" : "outline-info", className: "pdc-help-btn",
+        e(Button, { size: "sm", variant: showSettings ? "secondary" : "outline-secondary", className: "pdc-help-btn",
+          onClick: () => setShowSettings((v) => !v) }, e(Icon, { icon: FA.faCog || FA.faGear }), " Settings"),
+        e(Button, { size: "sm", variant: showHelp ? "info" : "outline-info",
           onClick: () => setShowHelp((v) => !v) }, showHelp ? "Hide help" : "Help")),
       showHelp ? e("div", { className: "pdc-help" },
         e("div", { className: "pdc-help-head" }, e("strong", null, "Help"),
           e(Button, { size: "sm", variant: "outline-secondary", onClick: () => setShowHelp(false) }, "Close")),
         renderHelp()) : null,
+      showSettings ? (() => {
+        const groups = [];
+        CFG_FIELDS.forEach((f) => { if (!groups.includes(f.g)) groups.push(f.g); });
+        const fieldVal = (f) => f.k in draft ? draft[f.k] : (cfg && cfg[f.k] != null ? String(cfg[f.k]) : "");
+        const setField = (k, v) => { setDraft((d) => Object.assign({}, d, { [k]: v })); setCfgMsg(null); };
+        return e("div", { className: "pdc-help pdc-settings" },
+          e("div", { className: "pdc-help-head" },
+            e("strong", null, "Plugin settings"),
+            e("div", { className: "pdc-set-actions" },
+              cfgMsg ? e("span", { className: "pdc-set-msg" }, cfgMsg) : null,
+              e(Button, { size: "sm", variant: "success", disabled: !Object.keys(draft).length,
+                onClick: saveSettings }, "Save"),
+              e(Button, { size: "sm", variant: "outline-warning", onClick: resetSettings }, "Reset defaults"),
+              e(Button, { size: "sm", variant: "outline-secondary", onClick: () => setShowSettings(false) }, "Close"))),
+          cfg == null ? e("p", null, "Loading config...")
+            : groups.map((g) => e("section", { key: g, className: "pdc-set-sec" },
+                e("h4", null, g),
+                e("div", { className: "pdc-set-grid" },
+                  CFG_FIELDS.filter((f) => f.g === g).map((f) =>
+                    e("label", { key: f.k, className: "pdc-set-field", title: f.help || "" },
+                      e("span", { className: "pdc-set-lbl" }, f.label),
+                      f.type === "select"
+                        ? e(Form.Control, { as: "select", size: "sm", value: fieldVal(f),
+                            onChange: (ev) => setField(f.k, ev.target.value) },
+                            f.opts.map((o) => e("option", { key: o[0], value: o[0] }, o[1])))
+                        : e(Form.Control, { type: f.type === "text" ? "text" : "number", size: "sm",
+                            value: fieldVal(f), min: f.min, max: f.max,
+                            step: f.step != null ? f.step : (f.type === "int" ? 1 : undefined),
+                            onChange: (ev) => setField(f.k, ev.target.value) }),
+                      f.help ? e("span", { className: "pdc-set-help" }, f.help) : null))))),
+          e("p", { className: "pdc-set-note" },
+            "Settings apply to the NEXT scan. Gallery dry-run / skip toggles live in the Images toolbar."));
+      })() : null,
       err ? e("div", { className: "pdc-error" }, `Error: ${err}`) : null,
       media === "video"
         ? e(React.Fragment, null,
@@ -559,5 +671,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.4.0)`);
+  console.log(`${LOG} plugin loaded (v0.5.0)`);
 })();

@@ -98,6 +98,22 @@
 
 .pdc-empty { opacity: .6; padding: 2rem; text-align: center; }
 
+/* settings panel */
+.pdc-settings { max-height: 70vh; }
+.pdc-set-actions { display: flex; align-items: center; gap: .5rem; }
+.pdc-set-msg { font-size: .8rem; color: #3fb950; }
+.pdc-set-sec { margin-bottom: 1rem; }
+.pdc-set-sec h4 { margin: .5rem 0 .4rem; font-size: .95rem; opacity: .85; }
+.pdc-set-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: .5rem .9rem;
+}
+.pdc-set-field { display: flex; flex-direction: column; gap: .15rem; margin: 0; }
+.pdc-set-lbl { font-size: .78rem; font-weight: 600; opacity: .85; }
+.pdc-set-help { font-size: .7rem; opacity: .55; }
+.pdc-set-note { font-size: .78rem; opacity: .6; margin: .25rem 0 0; }
+
 .pdc-cards {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));

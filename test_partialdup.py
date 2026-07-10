@@ -131,6 +131,17 @@ class ConfigTests(unittest.TestCase):
         self.assertIsNotNone(res["error"])
         self.assertIn("mode", res["error"])
 
+    def test_reset_config_restores_defaults(self):
+        _run_main({"action": "set_config",
+                   "config": {"mode": "deep", "segment_hamming": 3}})
+        res = _run_main({"action": "reset_config"})
+        self.assertIsNone(res["error"])
+        self.assertEqual(res["output"]["mode"], "hybrid")
+        self.assertEqual(res["output"]["segment_hamming"], 7)
+        # Persisted: a later get_config also sees the defaults.
+        res2 = _run_main({"action": "get_config"})
+        self.assertEqual(res2["output"]["mode"], "hybrid")
+
 
 class HashTests(unittest.TestCase):
     def test_phash_deterministic(self):
