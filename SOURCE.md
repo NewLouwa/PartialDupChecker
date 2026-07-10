@@ -4,6 +4,25 @@ This lets you install and update Partial Duplicate Checker through Stash's norma
 plugin UI (Settings > Plugins > Available Plugins > Add Source), exactly like the
 community plugins - instead of copying files by hand.
 
+## Ready-made source (GitHub, recommended)
+
+The built package is published on this repo's `source` branch. In Stash,
+Settings > Plugins > **Available Plugins** > **Add Source**:
+
+- Name: `CyzLab`
+- Source URL: `https://raw.githubusercontent.com/NewLouwa/PartialDupChecker/source/index.yml`
+- Local path: `cyzlab`
+
+Do NOT use the repo page or any other GitHub URL as the source - Stash needs the
+raw `index.yml` above, anything else fails with a YAML parse error
+("mapping values are not allowed in this context").
+
+To publish an update: rebuild (`./build_source.sh`, or the same steps on Windows),
+then force-push `dist/` contents to the `source` branch. The version string embeds
+a build stamp so Stash offers it as an update.
+
+## Self-hosted alternative
+
 ## 1. Build the package
 
 ```
