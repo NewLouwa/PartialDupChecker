@@ -63,11 +63,19 @@
         ["Cut / Montage", "A partial, reordered or spliced overlap."],
       ]],
     ]},
-    { t: "Images + galleries", c: [
-      ["p", "Near-duplicate images are grouped keep-one (largest kept). Visually-similar " +
-        "(non-identical) images can be auto-collected into Stash galleries - this is " +
-        "DRY-RUN by default (it only reports what it would create); flip the dry-run toggle " +
-        "to actually create them."],
+    { t: "Images", c: [
+      ["p", "Near-duplicate images are grouped keep-one. Like videos, pick a keep " +
+        "mode: Largest (default), Newest, Oldest (created date) or Manual (free " +
+        "selection, every tile ticks). The Match filter narrows groups instantly, no " +
+        "re-scan: Exact = identical phash only (a red 'exact' badge marks those " +
+        "tiles), Strict = near-identical (distance <= 2, e.g. the same image " +
+        "re-saved or resized), Normal = up to the configured duplicate threshold. " +
+        "Tightening the threshold in Settings > Plugins also applies instantly; " +
+        "loosening it beyond what the last scan stored needs a re-scan."],
+      ["p", "Galleries: the 'Group similar images into galleries' switch controls " +
+        "whether the next scan actually creates Stash galleries from visually-similar " +
+        "(non-identical) images, or only reports what it would create (OFF, the " +
+        "default). Similar-image grouping is separate from duplicate detection."],
     ]},
     { t: "Deleting", c: [
       ["p", "In the auto keep modes the KEEP item is never selectable, so you can't " +
@@ -188,6 +196,19 @@
   // Quality ranking: resolution first, bitrate as tiebreak, then file size.
   const qScore = (q) => q ? (q.w || 0) * (q.h || 0) * 1e7 + (q.br || 0) + (q.size || 0) / 1e6 : -1;
   const qLabel = (q) => q && q.w && q.h ? `${q.w}x${q.h}` : "";
+
+  const IKEEP_MODES = [
+    { key: "LARGEST", label: "Largest" },
+    { key: "NEWEST", label: "Newest" },
+    { key: "OLDEST", label: "Oldest" },
+    { key: "MANUAL", label: "Manual" },
+  ];
+  // View-time match filter over the stored pairs (phash hamming distance).
+  const IMATCH_MODES = [
+    { key: "normal", label: "Normal", md: null },   // current image_dup_hamming
+    { key: "strict", label: "Strict", md: 2 },
+    { key: "exact", label: "Exact", md: 0 },
+  ];
 
   // Backend tunables exposed in the Settings panel. Keys must exist in the
   // plugin's DEFAULT_CONFIG (set_config rejects unknown keys).
@@ -351,18 +372,21 @@
         })));
   };
 
-  // ---- image cluster card (grid, pick the keeper, delete the rest) -------- //
-  const ImageCard = ({ cluster, keeperId, selected, onToggle, onSetKeeper, onDeleteCluster, busy }) => {
+  // ---- image cluster card (grid) ------------------------------------------ //
+  // Auto keep modes: the keeper tile is highlighted and not selectable, other
+  // tiles get a checkbox + Keep override. Manual: no keeper - every tile
+  // (largest included) gets a checkbox.
+  const ImageCard = ({ cluster, keeperId, selected, onToggle, onSetKeeper, onDeleteCluster, busy, manual }) => {
     const px = (m) => m && m.w && m.h ? `${m.w}x${m.h}` : "";
     const ckey = cluster.parent.image_id;
-    const items = [{ id: cluster.parent.image_id, meta: cluster.parent.meta }]
-      .concat(cluster.members.map((m) => ({ id: m.image_id, meta: m.meta })));
-    const keeper = keeperId || cluster.parent.image_id;
+    const items = [{ id: cluster.parent.image_id, meta: cluster.parent.meta, d: cluster.parent.d }]
+      .concat(cluster.members.map((m) => ({ id: m.image_id, meta: m.meta, d: m.d })));
+    const keeper = manual ? null : (keeperId || cluster.parent.image_id);
     const dupCount = items.length - 1;
     return e("div", { className: "pdc-cluster" },
       e("div", { className: "pdc-img-grid" },
         items.map((it) => {
-          const isKeep = it.id === keeper;
+          const isKeep = !manual && it.id === keeper;
           return e("div", { key: it.id,
             className: "pdc-img-item" + (isKeep ? " pdc-keep-item" : (selected.has(it.id) ? " pdc-sel" : "")) },
             e("a", { href: `/images/${it.id}`, target: "_blank", rel: "noreferrer" },
@@ -374,14 +398,18 @@
                 : e(React.Fragment, null,
                     e(Form.Check, { type: "checkbox", checked: selected.has(it.id),
                       onChange: () => onToggle(it.id), className: "pdc-check", title: "select for delete" }),
-                    e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn",
+                    manual ? null : e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn",
                       onClick: () => onSetKeeper(ckey, it.id), title: "keep this one instead" }, "Keep")),
+              it.d === 0 ? e(Badge, { variant: "danger", bg: "danger", title: "identical phash" }, "exact") : null,
               e("span", { className: "pdc-px" }, px(it.meta))));
         })),
       e("div", { className: "pdc-cluster-foot" },
-        e("span", { className: "pdc-count" }, `${dupCount} duplicate${dupCount === 1 ? "" : "s"} - keeping #${keeper}`),
-        e(Button, { size: "sm", variant: "danger", disabled: busy, onClick: () => onDeleteCluster(ckey, keeper) },
-          `Delete ${dupCount} dup${dupCount === 1 ? "" : "s"}`)));
+        manual
+          ? e("span", { className: "pdc-count" }, `${items.length} files - free selection`)
+          : e(React.Fragment, null,
+              e("span", { className: "pdc-count" }, `${dupCount} duplicate${dupCount === 1 ? "" : "s"} - keeping #${keeper}`),
+              e(Button, { size: "sm", variant: "danger", disabled: busy, onClick: () => onDeleteCluster(ckey) },
+                `Delete ${dupCount} dup${dupCount === 1 ? "" : "s"}`))));
   };
 
   // ---- main page --------------------------------------------------------- //
@@ -399,7 +427,9 @@
     const [selected, setSelected] = React.useState(() => new Set());
     const [keepers, setKeepers] = React.useState(() => ({}));  // image cluster -> chosen keeper id
     const [vKeepers, setVKeepers] = React.useState(() => ({})); // video cluster -> chosen keeper scene id
-    const [keepMode, setKeepMode] = React.useState("LONGEST"); // LONGEST | NEWEST | OLDEST | MANUAL
+    const [keepMode, setKeepMode] = React.useState("LONGEST"); // LONGEST | BEST | NEWEST | OLDEST | MANUAL
+    const [iKeepMode, setIKeepMode] = React.useState("LARGEST"); // LARGEST | NEWEST | OLDEST | MANUAL
+    const [iMatch, setIMatch] = React.useState("normal");       // normal | strict | exact
     const [dates, setDates] = React.useState(() => ({}));      // scene id -> created date (epoch ms)
     const [quality, setQuality] = React.useState(() => ({}));  // scene id -> {w,h,br,size}
     const [err, setErr] = React.useState(null);
@@ -420,7 +450,7 @@
       return resp && resp.data && resp.data.runPluginOperation;
     }, [client]);
 
-    const loadDates = React.useCallback(async (cs) => {
+    const loadDates = React.useCallback(async (cs, attempt) => {
       const ids = Array.from(new Set(cs.flatMap((c) =>
         [c.parent.scene_id].concat(c.members.map((m) => m.scene_id))))).map(Number);
       if (!ids.length) return;
@@ -436,8 +466,19 @@
               br: f.bit_rate || 0, size: Number(f.size) || 0 };
         });
         if (aliveRef.current) { setDates(map); setQuality(qmap); }
-      } catch (ex) { console.warn(`${LOG} scene info unavailable`, ex); }
+      } catch (ex) {
+        // Stash's SQLite can be briefly locked during a scan - retry a couple
+        // of times instead of silently losing dates/quality for this load.
+        const n = attempt || 0;
+        if (n < 2 && aliveRef.current) {
+          setTimeout(() => { if (aliveRef.current) loadDatesRef.current(cs, n + 1); }, 4000);
+        } else {
+          console.warn(`${LOG} scene info unavailable`, ex);
+        }
+      }
     }, [client]);
+    const loadDatesRef = React.useRef(loadDates);
+    loadDatesRef.current = loadDates;
     const loadVideo = React.useCallback(async () => {
       try {
         const r = await run("clusters");
@@ -448,15 +489,21 @@
       }
       catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run, loadDates]);
-    const loadImage = React.useCallback(async () => {
+    const iMatchRef = React.useRef(iMatch);
+    iMatchRef.current = iMatch;
+    const loadImage = React.useCallback(async (matchKey) => {
       try {
-        const r = await run("image_clusters");
+        const mk = matchKey || iMatchRef.current;
+        const mode = IMATCH_MODES.find((m) => m.key === mk);
+        const args = mode && mode.md != null ? { max_distance: mode.md } : {};
+        const r = await run("image_clusters", args);
         if (!aliveRef.current) return;
         setIClusters((r && r.clusters) || []);
         setISummary((r && r.summary) || null);
         if (r && r.summary && typeof r.summary.dry_run === "boolean") setDryRun(r.summary.dry_run);
       } catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run]);
+    const switchIMatch = (k) => { setIMatch(k); setSelected(new Set()); setKeepers({}); loadImage(k); };
 
     const applyConfig = React.useCallback((c) => {
       if (!c) return;
@@ -616,13 +663,11 @@
     const deleteSelected = async () => {
       let ids = Array.from(selected);
       // Belt and braces: never delete a current keeper, whatever the selection says.
-      if (media === "video") {
-        const ks = new Set(vClusters.map(keeperOf));
-        ids = ids.filter((id) => !ks.has(id));
-      }
+      const ks = new Set(media === "video" ? vClusters.map(keeperOf) : iClusters.map(keeperOfImg));
+      ids = ids.filter((id) => !ks.has(id));
       if (!ids.length) return;
       const what = media === "image" ? "image" : "scene";
-      const keepNote = media === "video" && keepMode === "MANUAL"
+      const keepNote = (media === "video" ? keepMode : iKeepMode) === "MANUAL"
         ? "MANUAL mode: exactly what you ticked will be deleted."
         : "The KEEP item in each box is preserved.";
       if (!window.confirm(`Delete ${ids.length} ${what}(s) AND their files from disk?\n${keepNote} This cannot be undone.`)) return;
@@ -657,17 +702,43 @@
       finally { setBusy(false); }
     };
 
-    const setKeeper = (ckey, id) => setKeepers((k) => Object.assign({}, k, { [ckey]: id }));
+    const setKeeper = (ckey, id) => {
+      setKeepers((k) => Object.assign({}, k, { [ckey]: id }));
+      setSelected((p) => { const n = new Set(p); n.delete(id); return n; });
+    };
+    // Which image a cluster keeps: MANUAL protects nothing; else a per-group
+    // Keep pick wins, then the mode rule, then the parent (largest).
+    const keeperOfImg = (c) => {
+      if (iKeepMode === "MANUAL") return null;
+      const o = keepers[c.parent.image_id];
+      if (o != null) return o;
+      if (iKeepMode === "NEWEST" || iKeepMode === "OLDEST") {
+        const dated = [c.parent].concat(c.members)
+          .map((x) => ({ id: x.image_id, t: Date.parse((x.meta || {}).date || "") }))
+          .filter((x) => !isNaN(x.t));
+        if (dated.length)
+          return dated.reduce((a, b) =>
+            (iKeepMode === "NEWEST" ? b.t > a.t : b.t < a.t) ? b : a).id;
+      }
+      return c.parent.image_id; // LARGEST: backend already ranks the parent
+    };
+    const switchIKeepMode = (m) => { setIKeepMode(m); setKeepers({}); setSelected(new Set()); };
+    const selectAllImgDups = () => setSelected((p) => {
+      const n = new Set(p);
+      iClusters.forEach((c) => imgDups(c).forEach((id) => n.add(id)));
+      return n;
+    });
     const afterImgDelete = async (r) => {
       setSelected(new Set()); setKeepers({});
       await loadImage();
       if (r && r.failed && r.failed.length) setErr(`${r.failed.length} deletion(s) failed (see plugin log).`);
     };
     const imgDups = (c) => {
-      const k = keepers[c.parent.image_id] || c.parent.image_id;
+      const k = keeperOfImg(c);
       return [c.parent.image_id].concat(c.members.map((m) => m.image_id)).filter((id) => id !== k);
     };
     const deleteImgCluster = async (ckey) => {
+      if (iKeepMode === "MANUAL") return; // no keeper rule to apply
       const c = iClusters.find((x) => x.parent.image_id === ckey);
       if (!c) return;
       const ids = imgDups(c);
@@ -678,6 +749,7 @@
       catch (ex) { setErr(ex.message || String(ex)); } finally { setBusy(false); }
     };
     const deleteAllImgDups = async () => {
+      if (iKeepMode === "MANUAL") return; // use the selection + Delete bar instead
       const ids = iClusters.flatMap(imgDups);
       if (!ids.length) return;
       if (!window.confirm(`DELETE ${ids.length} duplicate images and their files from disk?\n` +
@@ -796,22 +868,48 @@
                   title: "tick every non-kept file of every group, following the keep mode" },
                   `Select all duplicates (${n})`) : null;
               })() : null))
-        : e("div", { className: "pdc-imgbar" },
-            iSummary ? e("span", { className: "pdc-status" },
-              `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
-              + `${iSummary.galleries_created || 0} galleries${(iSummary.planned_galleries || 0) ? ` (${iSummary.planned_galleries} planned)` : ""}`) : null,
-            e(Form.Check, { type: "switch", id: "pdc-skipgal", className: "pdc-dry",
-              checked: skipGal, onChange: toggleSkipGal,
-              label: "Ignore images already in a gallery" }),
-            e(Form.Control, { type: "text", size: "sm", className: "pdc-exclude",
-              placeholder: "Skip gallery IDs (e.g. 3,17)", value: excludeIds,
-              onChange: (ev) => setExcludeIds(ev.target.value), onBlur: applyExclude }),
-            e(Form.Check, { type: "switch", id: "pdc-dry", className: "pdc-dry",
-              checked: !dryRun, onChange: toggleDryRun,
-              label: dryRun ? "Galleries: dry-run (report only)" : "Galleries: WILL be created on next scan" }),
-            (() => { const n = iClusters.reduce((a, c) => a + c.members.length, 0);
-              return n > 0 ? e(Button, { variant: "danger", size: "sm", disabled: busy, onClick: deleteAllImgDups },
-                `Delete all duplicates (${n})`) : null; })()),
+        : e(React.Fragment, null,
+            e("div", { className: "pdc-keepbar" },
+              e("span", { className: "pdc-keeplbl" }, "Keep:"),
+              IKEEP_MODES.map((m) => e(Button, { key: m.key, size: "sm",
+                variant: iKeepMode === m.key ? "success" : "outline-secondary",
+                className: "pdc-tab", onClick: () => switchIKeepMode(m.key) }, m.label)),
+              e("span", { className: "pdc-keeplbl pdc-matchlbl" }, "Match:"),
+              IMATCH_MODES.map((m) => e(Button, { key: m.key, size: "sm",
+                variant: iMatch === m.key ? "primary" : "outline-secondary",
+                className: "pdc-tab", onClick: () => switchIMatch(m.key),
+                title: m.key === "exact" ? "identical phash only (distance 0)"
+                  : m.key === "strict" ? "near-identical (distance <= 2)"
+                  : "up to the configured duplicate threshold" }, m.label)),
+              e("span", { className: "pdc-keephint" },
+                iKeepMode === "MANUAL" ? "free selection: tick anything in every group, the largest included"
+                : iKeepMode === "LARGEST" ? "keeps the biggest image of each group (resolution, then size)"
+                : `keeps the ${iKeepMode === "NEWEST" ? "most recently" : "earliest"} added image of each group`),
+              iKeepMode !== "MANUAL" ? (() => {
+                const n = iClusters.reduce((a, c) => a + imgDups(c).length, 0);
+                return n > 0 ? e(Button, { size: "sm", variant: "outline-danger", className: "pdc-selall",
+                  onClick: selectAllImgDups,
+                  title: "tick every non-kept image of every group, following the keep mode" },
+                  `Select all duplicates (${n})`) : null;
+              })() : null),
+            e("div", { className: "pdc-imgbar" },
+              iSummary ? e("span", { className: "pdc-status" },
+                `${iSummary.dup_pairs || 0} dup pairs - ${iSummary.similar_clusters || 0} similar clusters - `
+                + `${iSummary.galleries_created || 0} galleries${(iSummary.planned_galleries || 0) ? ` (${iSummary.planned_galleries} planned)` : ""}`) : null,
+              e(Form.Check, { type: "switch", id: "pdc-dry", className: "pdc-dry",
+                checked: !dryRun, onChange: toggleDryRun,
+                label: dryRun
+                  ? "Group similar images into galleries: OFF (scan only reports)"
+                  : "Group similar images into galleries: ON (created on next scan)" }),
+              e(Form.Check, { type: "switch", id: "pdc-skipgal", className: "pdc-dry",
+                checked: skipGal, onChange: toggleSkipGal,
+                label: "Ignore images already in a gallery" }),
+              e(Form.Control, { type: "text", size: "sm", className: "pdc-exclude",
+                placeholder: "Skip gallery IDs (e.g. 3,17)", value: excludeIds,
+                onChange: (ev) => setExcludeIds(ev.target.value), onBlur: applyExclude }),
+              iKeepMode !== "MANUAL" ? (() => { const n = iClusters.reduce((a, c) => a + imgDups(c).length, 0);
+                return n > 0 ? e(Button, { variant: "danger", size: "sm", disabled: busy, onClick: deleteAllImgDups },
+                  `Delete all duplicates (${n})`) : null; })() : null)),
       selected.size > 0
         ? e("div", { className: "pdc-delbar" },
             e("span", null, `${selected.size} selected`),
@@ -825,7 +923,8 @@
         : e("div", { className: "pdc-clusters" },
             media === "image"
               ? clusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c,
-                  keeperId: keepers[c.parent.image_id], selected, onToggle: toggle,
+                  keeperId: keeperOfImg(c), selected, onToggle: toggle,
+                  manual: iKeepMode === "MANUAL",
                   onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
               : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
                   keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, quality, selected,
@@ -856,5 +955,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.10.0)`);
+  console.log(`${LOG} plugin loaded (v0.11.0)`);
 })();

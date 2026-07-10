@@ -33,6 +33,7 @@
 .pdc-keeplbl { font-size: .8rem; font-weight: 700; opacity: .8; margin-right: .2rem; }
 .pdc-keephint { font-size: .78rem; opacity: .6; margin-left: .4rem; }
 .pdc-selall { margin-left: auto; }
+.pdc-matchlbl { margin-left: .8rem; }
 .pdc-parent-manual { grid-template-columns: 1fr auto; }
 .pdc-keep-free { color: #58a6ff; font-size: .68rem; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
 .pdc-tab { min-width: 5rem; }

@@ -3,6 +3,34 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.11.0] - 2026-07-10
+
+### Added
+- **Images: keep modes** like videos - Largest (default), Newest, Oldest
+  (created date) or Manual (free selection: every tile, the largest
+  included, gets a checkbox; per-cluster delete buttons hide since there is
+  no keeper rule). Per-tile Keep buttons override the mode per group.
+- **Images: Match filter** (Normal / Strict / Exact) applied at view time
+  over the stored pairs - Exact shows identical-phash groups only (tiles get
+  a red "exact" badge), Strict means distance <= 2, Normal the configured
+  threshold. Switching is instant, no re-scan.
+- **Images: global "Select all duplicates (N)"** following the active keep
+  mode, next to the existing Delete-all button (both hidden in Manual).
+
+### Fixed
+- **Image duplicate threshold now applies without a re-scan**: clusters are
+  filtered by the CURRENT `image_dup_hamming` (and the Match filter) at view
+  time, instead of showing whatever the last scan stored. Note: raising the
+  threshold beyond the last scan's value still needs a re-scan.
+- Scene info fetch (dates/quality) retries a couple of times when Stash's
+  database is briefly locked during a scan, instead of silently giving up.
+- Picking an image keeper now also unticks it from the delete selection
+  (same protection videos already had).
+
+### Changed
+- The confusing gallery "dry-run" toggle is now an explicit ON/OFF switch:
+  "Group similar images into galleries" (OFF = scan only reports).
+
 ## [0.10.0] - 2026-07-10
 
 ### Added

@@ -1326,21 +1326,36 @@ def _worker_loop_images(server_connection):
     _log("image worker finished")
 
 
-def _image_clusters(conn, server_connection):
+def _image_clusters(conn, server_connection, max_distance=None):
     """Cluster near-duplicate image pairs into keep-one groups, enriched with
-    image meta (title/dimensions/thumbnail) fetched from Stash."""
+    image meta (title/dimensions/date) fetched from Stash.
+
+    max_distance filters the stored pairs at VIEW time, so tightening the
+    threshold (down to 0 = pixel-perfect phash match) applies instantly with
+    no re-scan. Pairs looser than the scan-time threshold don't exist in the
+    store, so raising it beyond that still needs a re-scan.
+    """
     rows = [dict(r) for r in conn.execute(
         "SELECT image_a, image_b, distance FROM image_groups")]
+    if max_distance is not None:
+        rows = [r for r in rows if r["distance"] <= max_distance]
     if not rows:
         return []
     comps = _components([(r["image_a"], r["image_b"], r["distance"]) for r in rows])
+    # Tightest edge per image - lets the UI show which matches are exact (0).
+    mind = {}
+    for r in rows:
+        for k in ("image_a", "image_b"):
+            i = r[k]
+            if i not in mind or r["distance"] < mind[i]:
+                mind[i] = r["distance"]
     ids = sorted({i for c in comps for i in c})
     meta = {}
     if ids and server_connection:
         data = _gql_data(
             server_connection,
             "query($ids:[Int!]){findImages(image_ids:$ids, filter:{per_page:-1}){images{"
-            "id title visual_files{ ... on ImageFile { width height size }}}}}",
+            "id title created_at visual_files{ ... on ImageFile { width height size }}}}}",
             {"ids": ids},
         )
         for im in ((data.get("findImages") or {}).get("images") or []):
@@ -1348,14 +1363,16 @@ def _image_clusters(conn, server_connection):
             meta[int(im["id"])] = {
                 "title": im.get("title") or "", "w": vf.get("width") or 0,
                 "h": vf.get("height") or 0, "size": vf.get("size") or 0,
+                "date": im.get("created_at") or "",
             }
     clusters = []
     for c in comps:
         parent = max(c, key=lambda i: (meta.get(i, {}).get("w", 0) * meta.get(i, {}).get("h", 0),
                                        meta.get(i, {}).get("size", 0), i))
         clusters.append({
-            "parent": {"image_id": parent, "meta": meta.get(parent)},
-            "members": [{"image_id": i, "meta": meta.get(i)} for i in c if i != parent],
+            "parent": {"image_id": parent, "meta": meta.get(parent), "d": mind.get(parent)},
+            "members": [{"image_id": i, "meta": meta.get(i), "d": mind.get(i)}
+                        for i in c if i != parent],
             "size": len(c) - 1,
         })
     clusters.sort(key=lambda c: -c["size"])
@@ -1621,12 +1638,25 @@ def action_scan_images(args):
 
 
 def action_image_clusters(args):
-    """Near-duplicate image groups (keep largest, flag the rest)."""
+    """Near-duplicate image groups (keep largest, flag the rest).
+
+    Optional max_distance tightens the match at view time (0 = exact phash);
+    defaults to the CURRENT image_dup_hamming so threshold changes apply
+    without a re-scan.
+    """
+    md = args.get("max_distance")
+    try:
+        md = int(md) if md is not None else None
+    except (TypeError, ValueError):
+        md = None
     conn = _connect()
     try:
-        clusters = _image_clusters(conn, _SERVER_CONNECTION)
+        if md is None:
+            md = _get_config(conn).get("image_dup_hamming")
+        clusters = _image_clusters(conn, _SERVER_CONNECTION, md)
         summary = _meta_get(conn, "image_summary", {})
-        return {"count": len(clusters), "clusters": clusters, "summary": summary}
+        return {"count": len(clusters), "clusters": clusters, "summary": summary,
+                "max_distance": md}
     finally:
         conn.close()
 
