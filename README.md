@@ -26,12 +26,42 @@ hash, so it can localize *which parts* of two scenes overlap.
 
 ## Install
 
+### Option A - plugin source (recommended)
+
+Install and update through Stash's plugin manager, like community plugins.
+
+In Stash: **Settings ▸ Plugins ▸ Available Plugins ▸ Add Source**, then enter:
+
+| Field | Value |
+|---|---|
+| Name | `CyzLab` |
+| Source URL | `https://raw.githubusercontent.com/NewLouwa/PartialDupChecker/source/index.yml` |
+| Local Path | `cyzlab` |
+
+Then tick **Partial Duplicate Checker** under the new source and click **Install**.
+Updates show up in **Installed Plugins** whenever a new build is published.
+
+> ⚠️ **The Source URL must be exactly the `raw.githubusercontent.com/…/source/index.yml`
+> URL above** — with `/source/` (the branch) in the path. Do **not** paste the repo
+> page (`github.com/NewLouwa/PartialDupChecker`) or a `/blob/` link: Stash would
+> fetch an HTML page and fail with
+> `yaml: line 35: mapping values are not allowed in this context`.
+
+Dependencies on the Stash host: `requests`, `Pillow`, `numpy`, and
+`ffmpeg`/`ffprobe` (see below). The source package is slim - it does not bundle
+`_vendor/`.
+
+### Option B - manual copy
+
 1. Copy this folder's files into your Stash plugins directory as
    `…/plugins/partial_dup_checker/`, or run the installer:
    - Windows: `./install.ps1`
    - Linux/macOS: `./install.sh` (or `./install.sh user@host` to deploy over SSH)
 2. In Stash: **Settings ▸ Plugins ▸ Reload Plugins**.
-3. Dependencies: `requests`, `Pillow`, `numpy`, and `ffmpeg`/`ffprobe`.
+
+### Dependencies
+
+`requests`, `Pillow`, `numpy`, and `ffmpeg`/`ffprobe`.
    - **Self-contained option:** run `./build_vendor.sh` (or `build_vendor.ps1`) to
      bundle the Python deps into `_vendor/`; the installers copy it along, so no
      pip/apk step is needed on the target. `_vendor/` is a *fallback* — a host that
@@ -45,17 +75,24 @@ hash, so it can localize *which parts* of two scenes overlap.
 
 ## Use
 
-Open **Partial Duplicate Checker** from the main nav menu (or the navbar icon),
-then:
+Open **Partial Dup** from the main nav menu (or the navbar icon), then:
 
-1. Click **Scan library**. The scan runs in a detached background worker, so it
-   keeps going if you close the tab; progress shows live.
-2. Browse results by tab — **All / Duplicate / Part / Cut-Montage**. Each card
-   shows both scenes, the matched time-ranges, and coverage + confidence.
-3. **Tag + mark** (per card, optional): adds a `PartialDup: …` tag to both scenes,
-   drops scene markers on the matched ranges, and records the relationship in a
-   custom field. This is the **only** thing that writes to your library, and only
-   when you click it — scanning never modifies anything.
+1. Pick **Videos** or **Images** at the top and click **Scan**. The scan runs in
+   a detached background worker (also available in Settings ▸ Tasks ▸ Plugin
+   Tasks), so it keeps going if you close the tab; progress shows live.
+2. Each box is one group of duplicates. The header shows the copy to **KEEP** —
+   by default the longest video / largest image. Filter videos by tab:
+   **All / Duplicate / Part / Cut-Montage**.
+3. **Not the copy you want?** Click the green **Keep** button on any other row —
+   it becomes the keeper, and the previous one drops into the list where it can
+   be selected like any other match.
+4. Tick the copies to remove and click **Delete**. The keeper is never
+   selectable, so you can't delete what you're keeping. Deletion removes files
+   from disk and is the **only** thing that writes to your library — scanning
+   never modifies anything.
+
+Image mode can also auto-collect visually-similar (non-identical) images into
+Stash galleries — dry-run by default; flip the toggle to actually create them.
 
 ## Fingerprinting modes
 
