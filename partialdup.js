@@ -43,11 +43,16 @@
         "Click Scan - it runs in the background (also available in Settings > Tasks).",
         "Each box is one item to KEEP (by default the longest video / largest image) " +
           "with the duplicates below.",
-        "Videos: pick a keep mode - Longest, Newest or Oldest protect one keeper per " +
-          "group automatically (Newest/Oldest use the scene's created date in Stash). " +
-          "Manual protects nothing: every file, the longest included, gets a checkbox.",
+        "Videos: pick a keep mode - Longest, Best quality (resolution then bitrate), " +
+          "Newest or Oldest (scene's created date) protect one keeper per group " +
+          "automatically. Manual protects nothing: every file, the longest included, " +
+          "gets a checkbox.",
         "In an auto mode, the green Keep button on any row overrides the rule for " +
           "that group; Select all duplicates ticks every non-kept file of every group.",
+        "The blue Meta button on a row copies that file's metadata (title, date, " +
+          "studio, performers, tags, URLs, rating) onto the KEEP file and renames the " +
+          "KEEP file after it - handy when the duplicate is better tagged than the " +
+          "copy you keep.",
         "Tick the ones to remove, click Delete, and confirm.",
       ]],
     ]},
@@ -162,23 +167,27 @@
       runPluginOperation(plugin_id: $id, args: $args)
     }
   `;
-  // Scene dates for the keep-newest/oldest modes (created_at, i.e. when the
-  // scene was added to Stash; file mod_time only as fallback). Fetched live
-  // from Stash so no plugin re-scan is needed.
+  // Scene info for the keep modes: created_at (date added to Stash; file
+  // mod_time only as fallback) for Newest/Oldest, and resolution/bitrate for
+  // Best quality. Fetched live from Stash so no plugin re-scan is needed.
   const SCENE_DATES = gql`
-    query PartialDup_SceneDates($ids: [Int!]) {
+    query PartialDup_SceneInfo($ids: [Int!]) {
       findScenes(scene_ids: $ids) {
-        scenes { id created_at files { mod_time } }
+        scenes { id created_at files { mod_time width height bit_rate size } }
       }
     }
   `;
 
   const KEEP_MODES = [
     { key: "LONGEST", label: "Longest" },
+    { key: "BEST", label: "Best quality" },
     { key: "NEWEST", label: "Newest" },
     { key: "OLDEST", label: "Oldest" },
     { key: "MANUAL", label: "Manual" },
   ];
+  // Quality ranking: resolution first, bitrate as tiebreak, then file size.
+  const qScore = (q) => q ? (q.w || 0) * (q.h || 0) * 1e7 + (q.br || 0) + (q.size || 0) / 1e6 : -1;
+  const qLabel = (q) => q && q.w && q.h ? `${q.w}x${q.h}` : "";
 
   // Backend tunables exposed in the Settings panel. Keys must exist in the
   // plugin's DEFAULT_CONFIG (set_config rejects unknown keys).
@@ -276,7 +285,7 @@
   // Auto modes (Longest/Newest/Oldest): the keeper sits in the header, cannot
   // be selected, and each row has a Keep override button. Manual mode: NO
   // protected keeper - every file (the longest included) is a selectable row.
-  const VideoCard = ({ cluster, keeperId, keepLabel, dates, selected, onToggle, onAll, onSetKeeper, manual }) => {
+  const VideoCard = ({ cluster, keeperId, keepLabel, dates, quality, selected, onToggle, onAll, onSetKeeper, onTransfer, busy, manual }) => {
     const p = cluster.parent || {};
     const ckey = p.scene_id;
     const items = [{ scene_id: p.scene_id, meta: p.meta, isParent: true }]
@@ -305,7 +314,8 @@
               sLink(keeper.scene_id, km),
               e("span", { className: "pdc-dur" },
                 (km.duration ? fmtTime(km.duration) : "")
-                + (dates[keeper.scene_id] ? ` - ${fmtDate(dates[keeper.scene_id])}` : ""))),
+                + (dates[keeper.scene_id] ? ` - ${fmtDate(dates[keeper.scene_id])}` : "")
+                + (qLabel(quality[keeper.scene_id]) ? ` - ${qLabel(quality[keeper.scene_id])}` : ""))),
             e("div", { className: "pdc-cluster-actions" },
               e("span", { className: "pdc-count" }, `${rows.length} match${rows.length === 1 ? "" : "es"}`),
               selectAll)),
@@ -325,12 +335,19 @@
                 e("span", { className: "pdc-conf" }, m.confidence != null ? `${Math.round(m.confidence * 100)}%` : ""),
                 e("span", { className: "pdc-dur" },
                   (m.meta && m.meta.duration ? fmtTime(m.meta.duration) : "")
-                  + (dates[m.scene_id] ? ` - ${fmtDate(dates[m.scene_id])}` : ""))),
+                  + (dates[m.scene_id] ? ` - ${fmtDate(dates[m.scene_id])}` : "")
+                  + (qLabel(quality[m.scene_id]) ? ` - ${qLabel(quality[m.scene_id])}` : ""))),
               sLink(m.scene_id, m.meta),
               e("span", { className: "pdc-cov" }, m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% matched${r}` : "")),
-            manual ? e("span", null) : e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
-              title: "keep this one instead",
-              onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onSetKeeper(ckey, m.scene_id); } }, "Keep"));
+            manual ? e("span", null) : e("div", { className: "pdc-row-actions" },
+              e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
+                title: "keep this one instead",
+                onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onSetKeeper(ckey, m.scene_id); } }, "Keep"),
+              e(Button, { size: "sm", variant: "outline-info", className: "pdc-keepbtn pdc-member-keep",
+                disabled: busy,
+                title: "copy this file's metadata (title, date, studio, performers, tags, URLs, rating) " +
+                  "to the KEEP file and rename the KEEP file after this one",
+                onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onTransfer(m.scene_id, keeper.scene_id); } }, "Meta")));
         })));
   };
 
@@ -383,7 +400,8 @@
     const [keepers, setKeepers] = React.useState(() => ({}));  // image cluster -> chosen keeper id
     const [vKeepers, setVKeepers] = React.useState(() => ({})); // video cluster -> chosen keeper scene id
     const [keepMode, setKeepMode] = React.useState("LONGEST"); // LONGEST | NEWEST | OLDEST | MANUAL
-    const [dates, setDates] = React.useState(() => ({}));      // scene id -> file date (epoch ms)
+    const [dates, setDates] = React.useState(() => ({}));      // scene id -> created date (epoch ms)
+    const [quality, setQuality] = React.useState(() => ({}));  // scene id -> {w,h,br,size}
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [showHelp, setShowHelp] = React.useState(false);
@@ -408,14 +426,17 @@
       if (!ids.length) return;
       try {
         const r = await client.query({ query: SCENE_DATES, variables: { ids }, fetchPolicy: "no-cache" });
-        const map = {};
+        const map = {}, qmap = {};
         (((r.data || {}).findScenes || {}).scenes || []).forEach((s) => {
           const f = (s.files && s.files[0]) || {};
           const d = Date.parse(s.created_at || f.mod_time || "");
           if (!isNaN(d)) map[Number(s.id)] = d;
+          if (f.width || f.height || f.bit_rate)
+            qmap[Number(s.id)] = { w: f.width || 0, h: f.height || 0,
+              br: f.bit_rate || 0, size: Number(f.size) || 0 };
         });
-        if (aliveRef.current) setDates(map);
-      } catch (ex) { console.warn(`${LOG} scene dates unavailable`, ex); }
+        if (aliveRef.current) { setDates(map); setQuality(qmap); }
+      } catch (ex) { console.warn(`${LOG} scene info unavailable`, ex); }
     }, [client]);
     const loadVideo = React.useCallback(async () => {
       try {
@@ -544,12 +565,17 @@
       if (keepMode === "MANUAL") return null;
       const o = vKeepers[c.parent.scene_id];
       if (o != null) return o;
+      const all = [c.parent.scene_id].concat(c.members.map((m) => m.scene_id));
       if (keepMode === "NEWEST" || keepMode === "OLDEST") {
-        const dated = [c.parent.scene_id].concat(c.members.map((m) => m.scene_id))
-          .filter((id) => dates[id] != null);
+        const dated = all.filter((id) => dates[id] != null);
         if (dated.length)
           return dated.reduce((a, b) =>
             (keepMode === "NEWEST" ? dates[b] > dates[a] : dates[b] < dates[a]) ? b : a);
+      }
+      if (keepMode === "BEST") {
+        const rated = all.filter((id) => quality[id] != null);
+        if (rated.length)
+          return rated.reduce((a, b) => qScore(quality[b]) > qScore(quality[a]) ? b : a);
       }
       return c.parent.scene_id;
     };
@@ -557,7 +583,7 @@
       vKeepers[c.parent.scene_id] != null ? "KEEP - your pick"
         : keepMode === "NEWEST" ? "KEEP - newest"
         : keepMode === "OLDEST" ? "KEEP - oldest"
-        : keepMode === "MANUAL" ? "KEEP - manual (default longest)"
+        : keepMode === "BEST" ? "KEEP - best quality"
         : "KEEP - longest";
     // Changing mode re-derives every keeper, so drop manual picks and the
     // selection (an id selected for delete may have just become a keeper).
@@ -573,6 +599,19 @@
       cs.forEach((c) => dupIdsOf(c).forEach((id) => n.add(id)));
       return n;
     });
+    const transferMeta = async (fromId, toId) => {
+      if (!window.confirm(
+        "Copy this file's metadata (title, date, studio, performers, tags, URLs, rating) " +
+        "to the KEEP file, and rename the KEEP file after it?\n" +
+        "Performers/tags/URLs are merged; title/date/studio/rating are overwritten.")) return;
+      setBusy(true); setErr(null);
+      try {
+        const r = await run("transfer_metadata", { from_scene_id: fromId, to_scene_id: toId, rename: true });
+        if (r && r.warning) setErr(r.warning);
+        await loadVideo();  // refresh titles/names from the synced index
+      } catch (ex) { setErr(ex.message || String(ex)); }
+      finally { setBusy(false); }
+    };
 
     const deleteSelected = async () => {
       let ids = Array.from(selected);
@@ -748,6 +787,7 @@
               e("span", { className: "pdc-keephint" },
                 keepMode === "MANUAL" ? "free selection: tick anything in every group, the longest included"
                 : keepMode === "LONGEST" ? "keeps the longest video of each group"
+                : keepMode === "BEST" ? "keeps the highest quality file of each group (resolution, then bitrate)"
                 : `keeps the ${keepMode === "NEWEST" ? "most recently" : "earliest"} added file of each group (created date)`),
               keepMode !== "MANUAL" ? (() => {
                 const n = clusters.reduce((a, c) => a + dupIdsOf(c).length, 0);
@@ -788,9 +828,9 @@
                   keeperId: keepers[c.parent.image_id], selected, onToggle: toggle,
                   onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
               : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
-                  keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, selected,
-                  manual: keepMode === "MANUAL",
-                  onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper }))));
+                  keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, quality, selected,
+                  manual: keepMode === "MANUAL", busy,
+                  onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper, onTransfer: transferMeta }))));
   };
 
   // ---- nav entries ------------------------------------------------------- //
@@ -816,5 +856,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.9.0)`);
+  console.log(`${LOG} plugin loaded (v0.10.0)`);
 })();

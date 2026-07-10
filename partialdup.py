@@ -1972,6 +1972,108 @@ def action_task_scan_images(args):
     return {"done": True, "summary": summary}
 
 
+def action_transfer_metadata(args):
+    """Copy scene metadata from a (partial) duplicate onto the kept scene, and
+    optionally rename the kept scene's primary file after the source's.
+
+    Overwrites title/details/date/rating/studio when the source has them;
+    performers, tags and URLs are unioned. Opt-in, one explicit click per pair.
+    """
+    if not _SERVER_CONNECTION:
+        raise PdcError("no server_connection (run inside Stash)")
+    try:
+        src_id = int(args.get("from_scene_id"))
+        dst_id = int(args.get("to_scene_id"))
+    except (TypeError, ValueError):
+        raise PdcError("from_scene_id and to_scene_id must be integers")
+    if src_id == dst_id:
+        raise PdcError("source and destination are the same scene")
+    rename = bool(args.get("rename", True))
+    sc = _SERVER_CONNECTION
+
+    data = _gql_data(
+        sc,
+        "query($ids:[Int!]){findScenes(scene_ids:$ids){scenes{"
+        "id title details date rating100 urls "
+        "studio{id} performers{id} tags{id} "
+        "files{id path basename}}}}",
+        {"ids": [src_id, dst_id]},
+    )
+    scenes = {int(s["id"]): s for s in (data.get("findScenes") or {}).get("scenes", [])}
+    src, dst = scenes.get(src_id), scenes.get(dst_id)
+    if not src or not dst:
+        raise PdcError("scene not found (source or destination)")
+
+    upd = {"id": str(dst_id)}
+    for k in ("title", "details", "date"):
+        if src.get(k):
+            upd[k] = src[k]
+    if src.get("rating100") is not None:
+        upd["rating100"] = src["rating100"]
+    if (src.get("studio") or {}).get("id"):
+        upd["studio_id"] = src["studio"]["id"]
+    urls = list(dict.fromkeys((dst.get("urls") or []) + (src.get("urls") or [])))
+    if urls:
+        upd["urls"] = urls
+    perf = list(dict.fromkeys(
+        [p["id"] for p in (dst.get("performers") or [])]
+        + [p["id"] for p in (src.get("performers") or [])]))
+    if perf:
+        upd["performer_ids"] = perf
+    tags = list(dict.fromkeys(
+        [t["id"] for t in (dst.get("tags") or [])]
+        + [t["id"] for t in (src.get("tags") or [])]))
+    if tags:
+        upd["tag_ids"] = tags
+    _gql_data(sc, "mutation($i:SceneUpdateInput!){sceneUpdate(input:$i){id}}", {"i": upd})
+
+    renamed, new_basename, warning = False, None, None
+    if rename:
+        sfile = (src.get("files") or [{}])[0]
+        dfile = (dst.get("files") or [{}])[0]
+        if sfile.get("basename") and dfile.get("basename") and dfile.get("id"):
+            s_stem = os.path.splitext(sfile["basename"])[0]
+            d_ext = os.path.splitext(dfile["basename"])[1]
+            new_basename = s_stem + d_ext
+            if new_basename != dfile["basename"]:
+                try:
+                    _gql_data(sc, "mutation($i:MoveFilesInput!){moveFiles(input:$i)}",
+                              {"i": {"ids": [str(dfile["id"])],
+                                     "destination_basename": new_basename}})
+                    renamed = True
+                except Exception as ex:
+                    warning = f"metadata copied, but rename failed: {ex}"
+                    new_basename = None
+            else:
+                new_basename = None  # already named like the source
+        else:
+            warning = "metadata copied, but file info missing - rename skipped"
+
+    # Best-effort: keep the plugin's own index display fields in sync so the
+    # clusters list shows the new title/name without a re-scan.
+    conn = _connect()
+    try:
+        with conn:
+            if upd.get("title"):
+                conn.execute("UPDATE scenes SET title=? WHERE scene_id=?",
+                             (upd["title"], dst_id))
+            if renamed and new_basename:
+                row = conn.execute("SELECT path FROM scenes WHERE scene_id=?",
+                                   (dst_id,)).fetchone()
+                if row and row["path"]:
+                    sep = "/" if "/" in row["path"] else "\\"
+                    parent = row["path"].rsplit(sep, 1)[0]
+                    conn.execute("UPDATE scenes SET path=? WHERE scene_id=?",
+                                 (parent + sep + new_basename, dst_id))
+    finally:
+        conn.close()
+
+    _log(f"transfer_metadata: scene {src_id} -> {dst_id}, renamed={renamed}"
+         + (f" ({warning})" if warning else ""))
+    return {"transferred": True, "from": src_id, "to": dst_id,
+            "renamed": renamed, "new_basename": new_basename, "warning": warning}
+
+
 ACTIONS = {
     "check": action_check,
     "task_scan": action_task_scan,
@@ -1984,6 +2086,7 @@ ACTIONS = {
     "results": action_results,
     "clusters": action_clusters,
     "delete_scenes": action_delete_scenes,
+    "transfer_metadata": action_transfer_metadata,
     "scan_images": action_scan_images,
     "image_clusters": action_image_clusters,
     "delete_images": action_delete_images,

@@ -3,6 +3,20 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.10.0] - 2026-07-10
+
+### Added
+- **Keep mode "Best quality"** (videos): keeps the highest-quality file of
+  each group - resolution first, bitrate then file size as tiebreaks
+  (fetched live from Stash). Resolution now shows next to the duration and
+  date on every row.
+- **Meta button on every row** (auto modes): copies that file's metadata -
+  title, details, date, studio, performers, tags, URLs, rating - onto the
+  KEEP file and renames the KEEP file after the source (extension kept).
+  Performers/tags/URLs are merged, the rest overwrites; one confirmation per
+  click, backed by a new `transfer_metadata` action. The plugin's own index
+  is synced so the list shows the new name without a re-scan.
+
 ## [0.9.0] - 2026-07-10
 
 ### Changed
