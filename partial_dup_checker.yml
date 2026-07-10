@@ -1,6 +1,6 @@
 name: Partial Duplicate Checker
 description: Finds duplicates Stash's whole-file phash misses - partial video matches (cuts, parts, montages) and near-duplicate images, plus auto-collecting similar images into galleries. Complements the built-in duplicate checker; never mutates the library unless you opt in.
-version: 0.6.0
+version: 0.7.0
 ui:
   javascript:
     - partialdup.js
@@ -13,6 +13,42 @@ exec:
   - python
   - "{pluginDir}/partialdup.py"
 interface: raw
+# Shown on Stash's Settings > Plugins page. FFmpeg + Images knobs live here;
+# the video-scan tunables live in the plugin page's own Settings panel.
+# A value set here wins over the same key saved from the in-page panel.
+settings:
+  ffmpeg_path:
+    displayName: ffmpeg path
+    description: "Full path to ffmpeg. Leave empty to use PATH (or PDC_FFMPEG env)."
+    type: STRING
+  ffprobe_path:
+    displayName: ffprobe path
+    description: "Full path to ffprobe. Leave empty to use PATH (or PDC_FFPROBE env)."
+    type: STRING
+  ffmpeg_timeout_s:
+    displayName: Per-video decode timeout (s)
+    description: "Hard cap per video decode; bounds a hung or corrupt file. Default 600."
+    type: NUMBER
+  image_dup_hamming:
+    displayName: "Images: duplicate threshold (hamming)"
+    description: "Phash distance at or below this = duplicate (keep one, flag the rest). Lower = stricter. Default 4."
+    type: NUMBER
+  image_neighbour_hamming:
+    displayName: "Images: similar threshold (hamming)"
+    description: "Between the duplicate threshold and this = visually similar (gallery cluster). Default 10."
+    type: NUMBER
+  image_min_cluster:
+    displayName: "Images: min images per similar cluster"
+    description: "Similar clusters smaller than this are ignored. Default 3."
+    type: NUMBER
+  gallery_prefix:
+    displayName: "Galleries: title prefix"
+    description: "Title prefix for auto-created similar-image galleries. Default 'Similar images'."
+    type: STRING
+  gallery_max_create:
+    displayName: "Galleries: max created per scan"
+    description: "Cap on galleries created in one scan. Default 200."
+    type: NUMBER
 tasks:
   # Native Stash Tasks (Settings > Tasks > Plugin Tasks). These run in-process so
   # Stash shows a progress bar and posts a completion notification. The plugin's

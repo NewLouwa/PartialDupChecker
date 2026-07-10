@@ -3,6 +3,24 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] - 2026-07-10
+
+### Added
+- **Native plugin settings** (Stash Settings > Plugins page): FFmpeg paths and
+  decode timeout, image duplicate/similar thresholds, min cluster size, and
+  gallery prefix / max-per-scan now live there (yml `settings:` block). The
+  backend reads them via GraphQL at config resolution; a value set there wins
+  over the same key saved from the in-page panel, and unset values fall back
+  as before. Works in both the request process and the detached scan worker.
+- **Help rewritten with per-parameter detail**: what each video-scan tunable,
+  match threshold, performance cap and image/gallery knob does, its default,
+  and when to raise or lower it.
+
+### Changed
+- The in-page Settings panel now covers only the video-scan tunables; the
+  FFmpeg and Images groups moved to the native plugin page (linked from the
+  panel note).
+
 ## [0.6.0] - 2026-07-10
 
 ### Added

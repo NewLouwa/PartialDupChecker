@@ -288,12 +288,56 @@ def _meta_set(conn, key, value):
     conn.commit()
 
 
+# Keys managed on Stash's native Settings > Plugins page (see the `settings:`
+# block in partial_dup_checker.yml). A value set there wins over the same key
+# saved via set_config; unset native keys fall through to the saved/default.
+_NATIVE_KEYS = ("ffmpeg_path", "ffprobe_path", "ffmpeg_timeout_s",
+                "image_dup_hamming", "image_neighbour_hamming",
+                "image_min_cluster", "gallery_prefix", "gallery_max_create")
+
+
+def _native_settings():
+    """Read this plugin's settings from Stash (Settings > Plugins page).
+
+    Returns only the keys the user actually set there, coerced to the type of
+    the corresponding DEFAULT_CONFIG value. Unreachable Stash / no server
+    connection (e.g. unit tests) -> {}.
+    """
+    if not _SERVER_CONNECTION:
+        return {}
+    try:
+        data = _gql_data(_SERVER_CONNECTION, "query { configuration { plugins } }")
+        raw = ((data.get("configuration") or {}).get("plugins") or {}).get(PLUGIN_ID) or {}
+    except Exception:
+        return {}
+    out = {}
+    for k in _NATIVE_KEYS:
+        v = raw.get(k)
+        if v is None or v == "":
+            continue
+        d = DEFAULT_CONFIG[k]
+        try:
+            if isinstance(d, bool):
+                v = bool(v)
+            elif isinstance(d, int):
+                v = int(v)
+            elif isinstance(d, float):
+                v = float(v)
+            else:
+                v = str(v)
+        except (TypeError, ValueError):
+            continue
+        out[k] = v
+    return out
+
+
 def _get_config(conn):
-    """Merge persisted overrides over DEFAULT_CONFIG."""
+    """DEFAULT_CONFIG <- saved overrides (set_config) <- native plugin settings."""
     cfg = dict(DEFAULT_CONFIG)
     saved = _meta_get(conn, "config", {})
     if isinstance(saved, dict):
         cfg.update(saved)
+    cfg.update(_native_settings())
     return cfg
 
 

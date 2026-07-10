@@ -70,12 +70,66 @@
         "Delete removes the selected items AND their files from disk - it cannot " +
         "be undone."],
     ]},
-    { t: "Settings", c: [
-      ["p", "The Settings button (toolbar) exposes the backend tunables: scan mode " +
-        "(hybrid/fast/deep), sampling interval, match thresholds per level, performance " +
-        "caps, ffmpeg paths and image/gallery knobs. Changes apply to the NEXT scan. " +
-        "Reset defaults restores everything. The Navbar option (per browser) picks how " +
-        "the plugin shows in the top bar: menu entry, right-side icon, or both."],
+    { t: "Settings - where", c: [
+      ["p", "Two places, split by purpose. The Settings button here (toolbar) holds the " +
+        "video-scan tunables; changes apply to the NEXT scan and Reset defaults restores " +
+        "everything. Stash's Settings > Plugins page holds the FFmpeg paths and the " +
+        "image/gallery thresholds - a value set there wins over the panel. The Navbar " +
+        "option (per browser) picks how the plugin shows in the top bar. Gallery " +
+        "dry-run/skip toggles act immediately from the Images toolbar."],
+    ]},
+    { t: "Settings - video scan", c: [
+      ["dl", [
+        ["Scan mode", "Hybrid uses Stash's existing sprite thumbnails to shortlist " +
+          "candidate pairs, then ffmpeg-decodes just those for precise ranges - best " +
+          "speed/accuracy. Fast is sprites only (~30s granularity): quick, finds whole " +
+          "duplicates, misses short cuts. Deep decodes every scene: most accurate, slowest."],
+        ["Deep sampling interval", "Seconds between sampled frames in deep/hybrid " +
+          "confirmation. Lower = finds shorter clips and tighter ranges, but scans slower. " +
+          "Default 2s; a 6s clip needs ~3 samples to register."],
+        ["Min match length", "Matches whose longest shared run is shorter than this are " +
+          "rejected (unless the clip is near-fully covered). Raise it if you get " +
+          "coincidental matches between similar-looking scenes; lower it to catch very " +
+          "short clips. Default 6s."],
+        ["Segment similarity (hamming)", "How different two sampled frames may be and " +
+          "still count as the same (0-16 bits). Lower = stricter: fewer false matches, " +
+          "but re-encodes/watermarks may escape. Default 7."],
+      ]],
+    ]},
+    { t: "Settings - match thresholds", c: [
+      ["dl", [
+        ["Duplicate: min coverage", "Both videos must match over at least this fraction " +
+          "of their length (both ways) to be called DUPLICATE. Default 0.95."],
+        ["Part: min contiguous coverage", "The shorter video must be one continuous " +
+          "chunk of the longer covering at least this fraction of it. Default 0.90."],
+        ["Cut/Montage: min total coverage", "Total (possibly reordered) overlap of the " +
+          "shorter video to be flagged CUT. Lowering finds looser montages but risks " +
+          "false positives. Default 0.60."],
+      ]],
+    ]},
+    { t: "Settings - performance", c: [
+      ["dl", [
+        ["Min shared segments / top-K / max pairs", "Bound how many candidate pairs the " +
+          "matcher considers on big libraries. Raise to be more exhaustive, lower to " +
+          "speed up huge collections."],
+        ["Hybrid deep budgets", "Caps on how many scenes/pairs get the expensive ffmpeg " +
+          "confirmation, plus a wall-clock budget so a scan always finishes. Matches " +
+          "beyond the budget simply stay at sprite precision."],
+      ]],
+    ]},
+    { t: "Settings - Stash plugin page (FFmpeg + Images)", c: [
+      ["dl", [
+        ["ffmpeg / ffprobe path", "Leave empty to use PATH (or PDC_FFMPEG/PDC_FFPROBE " +
+          "env). Set a full path if Stash's container/host has them elsewhere."],
+        ["Per-video decode timeout", "Kills a decode stuck on a corrupt file. Default 600s."],
+        ["Images: duplicate threshold", "Phash distance <= this = duplicate (keep one). " +
+          "Lower = stricter. Default 4."],
+        ["Images: similar threshold", "Between duplicate and this = visually similar - " +
+          "grouped into gallery clusters instead. Default 10."],
+        ["Images: min cluster size", "Similar groups smaller than this are ignored. Default 3."],
+        ["Galleries: prefix / max per scan", "Title prefix for auto-created galleries, " +
+          "and a per-scan creation cap. Default 'Similar images' / 200."],
+      ]],
     ]},
     { t: "FAQ", c: [
       ["dl", [
@@ -143,16 +197,6 @@
     { g: "Performance limits", k: "max_deep_scenes", label: "Hybrid: max deep scenes", type: "int", min: 1, max: 100000 },
     { g: "Performance limits", k: "max_deep_pairs", label: "Hybrid: max deep pairs", type: "int", min: 1, max: 1000000 },
     { g: "Performance limits", k: "max_deep_seconds", label: "Hybrid: deep time budget (s)", type: "int", min: 10, max: 86400 },
-    { g: "FFmpeg", k: "ffmpeg_path", label: "ffmpeg path (empty = PATH)", type: "text" },
-    { g: "FFmpeg", k: "ffprobe_path", label: "ffprobe path (empty = PATH)", type: "text" },
-    { g: "FFmpeg", k: "ffmpeg_timeout_s", label: "Per-video decode timeout (s)", type: "int", min: 30, max: 86400 },
-    { g: "Images", k: "image_dup_hamming", label: "Duplicate threshold (hamming)", type: "int", min: 0, max: 16,
-      help: "distance <= this = duplicate (keep one)" },
-    { g: "Images", k: "image_neighbour_hamming", label: "Similar threshold (hamming)", type: "int", min: 0, max: 24,
-      help: "between dup and this = similar (gallery cluster)" },
-    { g: "Images", k: "image_min_cluster", label: "Min images per similar cluster", type: "int", min: 2, max: 100 },
-    { g: "Images", k: "gallery_prefix", label: "Gallery title prefix", type: "text" },
-    { g: "Images", k: "gallery_max_create", label: "Max galleries created per scan", type: "int", min: 1, max: 10000 },
   ];
 
   // Navbar display preference - per-browser (localStorage), read on every
@@ -629,7 +673,9 @@
                             onChange: (ev) => setField(f.k, ev.target.value) }),
                       f.help ? e("span", { className: "pdc-set-help" }, f.help) : null))))),
           e("p", { className: "pdc-set-note" },
-            "Settings apply to the NEXT scan. Gallery dry-run / skip toggles live in the Images toolbar."));
+            "Settings apply to the NEXT scan. FFmpeg paths and image/gallery thresholds are on ",
+            e("a", { href: "/settings?tab=plugins" }, "Settings > Plugins"),
+            "; gallery dry-run / skip toggles live in the Images toolbar."));
       })() : null,
       err ? e("div", { className: "pdc-error" }, `Error: ${err}`) : null,
       media === "video"
@@ -704,5 +750,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.6.0)`);
+  console.log(`${LOG} plugin loaded (v0.7.0)`);
 })();
