@@ -41,8 +41,10 @@
       ["ol", [
         "Pick Videos or Images at the top.",
         "Click Scan - it runs in the background (also available in Settings > Tasks).",
-        "Each box is one item to KEEP (the longest video / largest image) with the " +
-          "duplicates below.",
+        "Each box is one item to KEEP (by default the longest video / largest image) " +
+          "with the duplicates below.",
+        "Not the copy you want? Click the green Keep button on any other row to keep " +
+          "that one instead - the previous keeper becomes selectable.",
         "Tick the ones to remove, click Delete, and confirm.",
       ]],
     ]},
@@ -61,7 +63,8 @@
     ]},
     { t: "Deleting", c: [
       ["p", "The KEEP item is never selectable, so you can't delete the copy you're " +
-        "keeping. Delete removes the selected items AND their files from disk - it cannot " +
+        "keeping. Use the Keep button to change which copy that is (videos and images). " +
+        "Delete removes the selected items AND their files from disk - it cannot " +
         "be undone."],
     ]},
     { t: "FAQ", c: [
@@ -119,24 +122,32 @@
       title: (meta && meta.title) || `Image ${id}` },
       (meta && meta.title) || `Image ${id}`);
 
-  // ---- video cluster card ------------------------------------------------ //
-  const VideoCard = ({ cluster, selected, onToggle, onAll }) => {
-    const p = cluster.parent || {}, pm = p.meta || {};
-    const allSel = cluster.members.length > 0 && cluster.members.every((m) => selected.has(m.scene_id));
+  // ---- video cluster card (pick the keeper, delete the rest) -------------- //
+  const VideoCard = ({ cluster, keeperId, selected, onToggle, onAll, onSetKeeper }) => {
+    const p = cluster.parent || {};
+    const ckey = p.scene_id;
+    const items = [{ scene_id: p.scene_id, meta: p.meta, isParent: true }]
+      .concat(cluster.members.map((m) => Object.assign({}, m, { isParent: false })));
+    const keeper = items.find((it) => it.scene_id === keeperId) || items[0];
+    const rows = items.filter((it) => it.scene_id !== keeper.scene_id);
+    const km = keeper.meta || {};
+    const allSel = rows.length > 0 && rows.every((it) => selected.has(it.scene_id));
     return e("div", { className: "pdc-cluster" },
       e("div", { className: "pdc-parent" },
-        e("a", { href: `/scenes/${p.scene_id}`, target: "_blank", rel: "noreferrer" },
-          e("img", { className: "pdc-thumb", loading: "lazy", src: `/scene/${p.scene_id}/screenshot` })),
+        e("a", { href: `/scenes/${keeper.scene_id}`, target: "_blank", rel: "noreferrer" },
+          e("img", { className: "pdc-thumb", loading: "lazy", src: `/scene/${keeper.scene_id}/screenshot` })),
         e("div", { className: "pdc-parent-meta" },
-          e("span", { className: "pdc-keep" }, "KEEP - longest"),
-          sLink(p.scene_id, pm),
-          e("span", { className: "pdc-dur" }, pm.duration ? fmtTime(pm.duration) : "")),
+          e("span", { className: "pdc-keep" }, keeper.isParent ? "KEEP - longest" : "KEEP - your pick"),
+          sLink(keeper.scene_id, km),
+          e("span", { className: "pdc-dur" }, km.duration ? fmtTime(km.duration) : "")),
         e("div", { className: "pdc-cluster-actions" },
-          e("span", { className: "pdc-count" }, `${cluster.members.length} match${cluster.members.length === 1 ? "" : "es"}`),
-          e(Form.Check, { type: "checkbox", checked: allSel, label: "select all", onChange: () => onAll(cluster, !allSel) }))),
+          e("span", { className: "pdc-count" }, `${rows.length} match${rows.length === 1 ? "" : "es"}`),
+          e(Form.Check, { type: "checkbox", checked: allSel, label: "select all", onChange: () => onAll(cluster, !allSel, keeper.scene_id) }))),
       e("div", { className: "pdc-members" },
-        cluster.members.map((m) => {
-          const lv = LEVELS[m.level] || { label: m.level || "?", variant: "secondary" };
+        rows.map((m) => {
+          const lv = m.isParent
+            ? { label: "Longest", variant: "success" }
+            : (LEVELS[m.level] || { label: m.level || "?", variant: "secondary" });
           const rg = m.runs && m.runs[0];
           const r = rg ? ` - ${fmtTime(rg.b_start)}-${fmtTime(rg.b_end)}` : "";
           return e("label", { key: m.scene_id, className: "pdc-member" + (selected.has(m.scene_id) ? " pdc-sel" : "") },
@@ -148,7 +159,10 @@
                 e("span", { className: "pdc-conf" }, m.confidence != null ? `${Math.round(m.confidence * 100)}%` : ""),
                 e("span", { className: "pdc-dur" }, m.meta && m.meta.duration ? fmtTime(m.meta.duration) : "")),
               sLink(m.scene_id, m.meta),
-              e("span", { className: "pdc-cov" }, m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% matched${r}` : "")));
+              e("span", { className: "pdc-cov" }, m.coverage_b != null ? `${Math.round(m.coverage_b * 100)}% matched${r}` : "")),
+            e(Button, { size: "sm", variant: "outline-success", className: "pdc-keepbtn pdc-member-keep",
+              title: "keep this one instead",
+              onClick: (ev) => { ev.preventDefault(); ev.stopPropagation(); onSetKeeper(ckey, m.scene_id); } }, "Keep"));
         })));
   };
 
@@ -199,6 +213,7 @@
     const [tab, setTab] = React.useState("ALL");
     const [selected, setSelected] = React.useState(() => new Set());
     const [keepers, setKeepers] = React.useState(() => ({}));  // image cluster -> chosen keeper id
+    const [vKeepers, setVKeepers] = React.useState(() => ({})); // video cluster -> chosen keeper scene id
     const [err, setErr] = React.useState(null);
     const [busy, setBusy] = React.useState(false);
     const [showHelp, setShowHelp] = React.useState(false);
@@ -281,10 +296,18 @@
     };
 
     const toggle = (id) => setSelected((p) => { const n = new Set(p); n.has(id) ? n.delete(id) : n.add(id); return n; });
-    const selAll = (cluster, on) => setSelected((p) => {
-      const n = new Set(p), key = media === "image" ? "image_id" : "scene_id";
-      cluster.members.forEach((m) => on ? n.add(m[key]) : n.delete(m[key])); return n;
+    // Select/deselect every item of the cluster except the keeper (parent included).
+    const selAll = (cluster, on, keeperId) => setSelected((p) => {
+      const n = new Set(p);
+      [cluster.parent.scene_id].concat(cluster.members.map((m) => m.scene_id))
+        .filter((id) => id !== keeperId)
+        .forEach((id) => on ? n.add(id) : n.delete(id));
+      return n;
     });
+    const setVKeeper = (ckey, id) => {
+      setVKeepers((k) => Object.assign({}, k, { [ckey]: id }));
+      setSelected((p) => { const n = new Set(p); n.delete(id); return n; });
+    };
 
     const deleteSelected = async () => {
       const ids = Array.from(selected);
@@ -299,8 +322,23 @@
         const gone = new Set((r && r.deleted) || []);
         const key = media === "image" ? "image_id" : "scene_id";
         const setC = media === "image" ? setIClusters : setVClusters;
-        setC((cs) => cs.map((c) => Object.assign({}, c, { members: c.members.filter((m) => !gone.has(m[key])) }))
-          .filter((c) => c.members.length > 0));
+        const keepersMap = media === "image" ? keepers : vKeepers;
+        // Drop deleted items; if the parent itself was deleted, promote the chosen
+        // keeper (or the first survivor) so the cluster stays coherent.
+        setC((cs) => cs.map((c) => {
+          const members = c.members.filter((m) => !gone.has(m[key]));
+          if (!gone.has(c.parent[key]))
+            return members.length ? Object.assign({}, c, { members }) : null;
+          if (!members.length) return null;
+          const kid = keepersMap[c.parent[key]];
+          let idx = members.findIndex((m) => m[key] === kid);
+          if (idx < 0) idx = 0;
+          const np = members[idx];
+          return Object.assign({}, c, {
+            parent: { [key]: np[key], meta: np.meta },
+            members: members.filter((_, i) => i !== idx),
+          });
+        }).filter(Boolean));
         setSelected(new Set());
         if (r && r.failed && r.failed.length) setErr(`${r.failed.length} deletion(s) failed (see plugin log).`);
       } catch (ex) { setErr(ex.message || String(ex)); }
@@ -410,7 +448,9 @@
               ? clusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c,
                   keeperId: keepers[c.parent.image_id], selected, onToggle: toggle,
                   onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
-              : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c, selected, onToggle: toggle, onAll: selAll }))));
+              : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
+                  keeperId: vKeepers[c.parent.scene_id], selected,
+                  onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper }))));
   };
 
   // ---- nav entries ------------------------------------------------------- //
@@ -434,5 +474,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.2.0)`);
+  console.log(`${LOG} plugin loaded (v0.3.0)`);
 })();
