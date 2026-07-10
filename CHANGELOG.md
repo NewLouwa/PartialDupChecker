@@ -3,6 +3,22 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.0] - 2026-07-10
+
+### Changed
+- **Scans now run as native Stash Tasks, tracked in Stash's own Job Queue.**
+  The plugin's own Scan button starts the scan via `runPluginTask` against
+  the same tasks Settings > Tasks already exposes, instead of a
+  plugin-private detached worker - so a scan started from this page shows
+  up in Stash's Job Queue (bell icon) with its own progress and completion
+  notification, exactly like starting it from Settings > Tasks.
+
+### Added
+- **Cancel scan button**, shown while a scan is running: stops the job via
+  `stopJob`. If the page was reloaded and the job id was lost, it's
+  recovered by matching the task's name in Stash's Job Queue. Cancelling
+  keeps whatever was already indexed - a later scan resumes from there.
+
 ## [0.11.0] - 2026-07-10
 
 ### Added

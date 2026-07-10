@@ -2,7 +2,7 @@ id: partial_dup_checker
 name: Partial Duplicate Checker
 metadata:
   description: Detects partial video duplicates (cuts, parts, montages) that Stash's whole-file phash duplicate finder misses. Builds a per-scene perceptual-hash timeline, indexes segments with LSH bands, aligns candidate pairs to localize matched time-ranges, and classifies into Duplicate / Part / Cut-Montage. Separate from and complementary to the built-in duplicate checker; opt-in write-back only.
-  version: 0.11.0
+  version: 0.12.0
   date: "2026-06-18 00:00:00"
   requires: []
 files:

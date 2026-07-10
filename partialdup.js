@@ -40,7 +40,9 @@
     { t: "Quick start", c: [
       ["ol", [
         "Pick Videos or Images at the top.",
-        "Click Scan - it runs in the background (also available in Settings > Tasks).",
+        "Click Scan - it runs as a Stash Task in the background (also startable from " +
+          "Settings > Tasks), so it shows up in Stash's own Job Queue and survives " +
+          "closing this tab. Cancel scan here (or Stop from the Job Queue) stops it.",
         "Each box is one item to KEEP (by default the longest video / largest image) " +
           "with the duplicates below.",
         "Videos: pick a keep mode - Longest, Best quality (resolution then bitrate), " +
@@ -152,7 +154,10 @@
     { t: "FAQ", c: [
       ["dl", [
         ["Does it change my library?", "No. Scanning only reads. Deletes happen only when you click them."],
-        ["Where do I run it?", "This page, or Settings > Tasks > Plugin Tasks (with a progress bar + notification)."],
+        ["Where do I run it?", "This page, or Settings > Tasks > Plugin Tasks - either way it's the same " +
+          "Stash Task, tracked in Stash's Job Queue with a progress bar and completion notification."],
+        ["Can I cancel a scan?", "Yes - the Cancel scan button here, or Stop on the job from Stash's own " +
+          "Job Queue (bell icon). Work already indexed is kept; re-scanning later resumes from there."],
       ]],
     ]},
   ];
@@ -175,6 +180,32 @@
       runPluginOperation(plugin_id: $id, args: $args)
     }
   `;
+  // Start a scan as a native Stash Task (see the yml `tasks:` block) instead
+  // of a plugin-private operation, so Stash tracks it in its own Job Queue -
+  // visible, cancellable (stopJob), with its own completion notification.
+  const RUN_TASK = gql`
+    mutation PartialDup_RunTask($id: ID!, $name: String!) {
+      runPluginTask(plugin_id: $id, task_name: $name)
+    }
+  `;
+  const STOP_JOB = gql`
+    mutation PartialDup_StopJob($jobId: ID!) {
+      stopJob(job_id: $jobId)
+    }
+  `;
+  // Fallback lookup to recover a running job's id after a page reload (the
+  // id returned by runPluginTask isn't persisted anywhere else).
+  const JOB_QUEUE = gql`
+    query PartialDup_JobQueue {
+      jobQueue { id status description }
+    }
+  `;
+  // Must match the `name:` of the corresponding task in partial_dup_checker.yml
+  // exactly - Stash looks the task up by that string.
+  const TASK_NAME = {
+    video: "Scan videos for partial duplicates",
+    image: "Scan images for duplicates and similar galleries",
+  };
   // Scene info for the keep modes: created_at (date added to Stash; file
   // mod_time only as fallback) for Newest/Oldest, and resolution/bitrate for
   // Best quality. Fetched live from Stash so no plugin re-scan is needed.
@@ -440,6 +471,7 @@
     const [draft, setDraft] = React.useState(() => ({})); // unsaved field edits
     const [cfgMsg, setCfgMsg] = React.useState(null);  // transient "Saved" note
     const [navPref, setNavPref] = React.useState(getNavPrefLocal);
+    const [jobId, setJobId] = React.useState(null);  // Stash Job Queue id of our running task, if known
     const aliveRef = React.useRef(true);
     const mediaRef = React.useRef(media);
     mediaRef.current = media;
@@ -528,7 +560,10 @@
           const s = await run("scan_status");
           if (!aliveRef.current) return;
           setStatus(s);
-          if (prev && !(s && s.running)) { mediaRef.current === "image" ? await loadImage() : await loadVideo(); }
+          if (prev && !(s && s.running)) {
+            mediaRef.current === "image" ? await loadImage() : await loadVideo();
+            if (aliveRef.current) setJobId(null);  // job finished/stopped - stop tracking it
+          }
           prev = !!(s && s.running);
         } catch (ex) { /* transient */ }
         if (aliveRef.current) setTimeout(poll, 3000);
@@ -537,14 +572,42 @@
       return () => { aliveRef.current = false; };
     }, [run, loadVideo, loadImage, loadConfig]);
 
-    const switchMedia = (m) => { setMedia(m); setSelected(new Set()); setTab("ALL"); setErr(null); };
+    const switchMedia = (m) => { setMedia(m); setSelected(new Set()); setTab("ALL"); setErr(null); setJobId(null); };
+    // Starts the scan as a native Stash Task (runPluginTask), so it's tracked
+    // in Stash's own Job Queue - visible, cancellable, with its own
+    // completion notification - on top of this page's own progress polling.
     const startScan = async () => {
       setErr(null);
-      try { await run(media === "image" ? "scan_images" : "scan"); setTimeout(() => run("scan_status").then(setStatus), 400); }
-      catch (ex) { setErr(ex.message || String(ex)); }
+      try {
+        const name = TASK_NAME[media === "image" ? "image" : "video"];
+        const resp = await client.mutate({ mutation: RUN_TASK, variables: { id: PLUGIN_ID, name } });
+        const jid = resp && resp.data && resp.data.runPluginTask;
+        setJobId(jid || null);
+        setTimeout(() => run("scan_status").then(setStatus), 400);
+      } catch (ex) { setErr(ex.message || String(ex)); }
+    };
+    const cancelScan = async () => {
+      if (!window.confirm("Cancel the running scan? Progress made so far (indexed scenes/images) is kept.")) return;
+      setErr(null);
+      try {
+        let jid = jobId;
+        if (!jid) {
+          // Lost across a page reload - recover it from Stash's own Job Queue
+          // by matching our task's name in the job description.
+          const name = TASK_NAME[media === "image" ? "image" : "video"];
+          const r = await client.query({ query: JOB_QUEUE, fetchPolicy: "no-cache" });
+          const jobs = (r.data && r.data.jobQueue) || [];
+          const j = jobs.find((x) => x.status === "RUNNING" && (x.description || "").includes(name));
+          jid = j && j.id;
+        }
+        if (!jid) { setErr("Could not find the running job - cancel it from Stash's own Job Queue instead."); return; }
+        await client.mutate({ mutation: STOP_JOB, variables: { jobId: jid } });
+        setJobId(null);
+      } catch (ex) { setErr(ex.message || String(ex)); }
     };
     const resetScan = async () => {
       setErr(null);
+      setJobId(null);
       try { await run("reset"); setStatus(await run("scan_status")); } catch (ex) { setErr(ex.message || String(ex)); }
     };
     const toggleDryRun = async () => {
@@ -789,6 +852,9 @@
         e(Button, { variant: "primary", disabled: running, onClick: startScan },
           running ? "Scanning..." : media === "image" ? "Scan images" : "Scan videos"),
         progress,
+        running ? e(Button, { size: "sm", variant: "outline-danger", onClick: cancelScan,
+          title: "Stops the job in Stash's own Job Queue (same as cancelling it from there)" },
+          "Cancel scan") : null,
         (status && status.running && status.worker_alive === false)
           ? e(Button, { size: "sm", variant: "warning", onClick: resetScan }, "Reset stuck scan") : null,
         e(Button, { size: "sm", variant: showSettings ? "secondary" : "outline-secondary", className: "pdc-help-btn",
@@ -955,5 +1021,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.11.0)`);
+  console.log(`${LOG} plugin loaded (v0.12.0)`);
 })();

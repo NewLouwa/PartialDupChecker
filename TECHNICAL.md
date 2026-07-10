@@ -87,6 +87,14 @@ that survives client disconnect and writes progress to the DB `meta` table.
 was killed abnormally and its PID was later reused); the UI surfaces a "Reset stuck
 scan" button when the status says running but the worker PID is no longer alive.
 
+Since v0.12.0 the plugin's own page starts scans via `runPluginTask` against the
+`task_scan`/`task_scan_images` actions (yml `tasks:` block) instead of `scan`/
+`scan_images`, so Stash's Job Queue tracks and can `stopJob` them; `_worker_loop`/
+`_worker_loop_images` set `worker_pid = os.getpid()` regardless of which path
+invoked them, so `scan_status` polling and the stuck-scan recovery above are
+unaffected either way. The `scan`/`scan_images`/`__worker` detached-worker actions
+remain for direct API use but are no longer called by the bundled UI.
+
 The DB opens in **WAL** mode with a 30 s `busy_timeout` so the long-running worker's
 writes don't block the request process's reads. WAL needs a local filesystem — keep
 `PDC_DB` on local disk (not an NFS mount); the default `<tmp>/.partialdup.sqlite`

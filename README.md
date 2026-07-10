@@ -77,9 +77,11 @@ Dependencies on the Stash host: `requests`, `Pillow`, `numpy`, and
 
 Open **Partial Dup** from the main nav menu (or the navbar icon), then:
 
-1. Pick **Videos** or **Images** at the top and click **Scan**. The scan runs in
-   a detached background worker (also available in Settings ▸ Tasks ▸ Plugin
-   Tasks), so it keeps going if you close the tab; progress shows live.
+1. Pick **Videos** or **Images** at the top and click **Scan**. The scan runs as a
+   native Stash Task (also startable from Settings ▸ Tasks ▸ Plugin Tasks), so
+   it's tracked in Stash's own Job Queue - visible, cancellable, and it keeps
+   going if you close the tab; progress shows live on this page too. **Cancel
+   scan** here (or Stop from the Job Queue) stops it.
 2. Each box is one group of duplicates. The header shows the copy to **KEEP** —
    by default the longest video / largest image. Filter videos by tab:
    **All / Duplicate / Part / Cut-Montage**.
