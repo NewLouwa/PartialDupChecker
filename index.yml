@@ -1,0 +1,9 @@
+- id: partial_dup_checker
+  name: Partial Duplicate Checker
+  metadata:
+    description: Finds partial video duplicates (cuts/parts/montages) and near-duplicate images that Stash's whole-file phash misses. Clusters under the longest video, pick which copy to keep, opt-in delete, and similar-image galleries.
+  version: "0.13.0-20260711-071417"
+  date: "2026-07-11 07:14:17"
+  path: partial_dup_checker.zip
+  sha256: 888ac5bee0751268aca1a2282e210206cc15befc1dcbb5913b0c1c1340aa1579
+  requires: []
