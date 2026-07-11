@@ -2026,7 +2026,7 @@ def action_transfer_metadata(args):
         "query($ids:[Int!]){findScenes(scene_ids:$ids){scenes{"
         "id title details date rating100 urls "
         "studio{id} performers{id} tags{id} "
-        "files{id path basename}}}}",
+        "files{id path basename parent_folder{id}}}}}",
         {"ids": [src_id, dst_id]},
     )
     scenes = {int(s["id"]): s for s in (data.get("findScenes") or {}).get("scenes", [])}
@@ -2065,10 +2065,18 @@ def action_transfer_metadata(args):
             s_stem = os.path.splitext(sfile["basename"])[0]
             d_ext = os.path.splitext(dfile["basename"])[1]
             new_basename = s_stem + d_ext
-            if new_basename != dfile["basename"]:
+            dfolder = (dfile.get("parent_folder") or {}).get("id")
+            if not dfolder:
+                warning = "metadata copied, but rename failed: destination folder unknown"
+                new_basename = None
+            elif new_basename != dfile["basename"]:
                 try:
+                    # moveFiles requires a destination folder even for a same-folder
+                    # rename ("must specify destination folder or path") - pass the
+                    # file's current parent folder back so it only renames in place.
                     _gql_data(sc, "mutation($i:MoveFilesInput!){moveFiles(input:$i)}",
                               {"i": {"ids": [str(dfile["id"])],
+                                     "destination_folder_id": dfolder,
                                      "destination_basename": new_basename}})
                     renamed = True
                 except Exception as ex:

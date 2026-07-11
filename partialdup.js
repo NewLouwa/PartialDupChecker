@@ -1021,5 +1021,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.12.0)`);
+  console.log(`${LOG} plugin loaded (v0.12.1)`);
 })();

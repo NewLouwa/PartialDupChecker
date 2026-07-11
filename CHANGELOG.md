@@ -3,6 +3,15 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.12.1] - 2026-07-10
+
+### Fixed
+- **Meta button rename failing** with "must specify destination folder or
+  path" (Stash's `moveFiles` requires a destination folder even for a
+  same-folder rename - it was only sent `destination_basename`). Now fetches
+  the kept file's `parent_folder.id` and passes it as `destination_folder_id`
+  so the file is renamed in place instead.
+
 ## [0.12.0] - 2026-07-10
 
 ### Changed
