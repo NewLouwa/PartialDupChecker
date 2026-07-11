@@ -141,6 +141,15 @@
 
 /* clusters */
 .pdc-clusters { display: flex; flex-direction: column; gap: 1rem; }
+.pdc-loadmore {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .75rem;
+  margin-top: 1rem;
+  padding: .75rem;
+}
+.pdc-loadmore-note { font-size: .8rem; opacity: .6; }
 .pdc-cluster {
   border: 1px solid rgba(255, 255, 255, .12);
   border-radius: .4rem;

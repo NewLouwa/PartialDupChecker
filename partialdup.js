@@ -56,6 +56,9 @@
           "KEEP file after it - handy when the duplicate is better tagged than the " +
           "copy you keep.",
         "Tick the ones to remove, click Delete, and confirm.",
+        "Groups load 25 at a time (Load more / Show all at the bottom) - a big " +
+          "library can return thousands of groups, and rendering them all at once " +
+          "would make the page sluggish.",
       ]],
     ]},
     { t: "Levels (videos)", c: [
@@ -240,6 +243,12 @@
     { key: "strict", label: "Strict", md: 2 },
     { key: "exact", label: "Exact", md: 0 },
   ];
+
+  // Groups render in batches instead of all at once - a scan on a big library
+  // can return thousands of clusters, and mounting every card up front makes
+  // the page sluggish (and can look like the scan silently stalled/skipped
+  // most of the library, when it's really just the render that's slow).
+  const CLUSTERS_PAGE_SIZE = 25;
 
   // Backend tunables exposed in the Settings panel. Keys must exist in the
   // plugin's DEFAULT_CONFIG (set_config rejects unknown keys).
@@ -472,6 +481,7 @@
     const [cfgMsg, setCfgMsg] = React.useState(null);  // transient "Saved" note
     const [navPref, setNavPref] = React.useState(getNavPrefLocal);
     const [jobId, setJobId] = React.useState(null);  // Stash Job Queue id of our running task, if known
+    const [visibleCount, setVisibleCount] = React.useState(CLUSTERS_PAGE_SIZE); // groups rendered so far
     const aliveRef = React.useRef(true);
     const mediaRef = React.useRef(media);
     mediaRef.current = media;
@@ -535,7 +545,7 @@
         if (r && r.summary && typeof r.summary.dry_run === "boolean") setDryRun(r.summary.dry_run);
       } catch (ex) { if (aliveRef.current) setErr(ex.message || String(ex)); }
     }, [run]);
-    const switchIMatch = (k) => { setIMatch(k); setSelected(new Set()); setKeepers({}); loadImage(k); };
+    const switchIMatch = (k) => { setIMatch(k); setSelected(new Set()); setKeepers({}); setVisibleCount(CLUSTERS_PAGE_SIZE); loadImage(k); };
 
     const applyConfig = React.useCallback((c) => {
       if (!c) return;
@@ -572,7 +582,7 @@
       return () => { aliveRef.current = false; };
     }, [run, loadVideo, loadImage, loadConfig]);
 
-    const switchMedia = (m) => { setMedia(m); setSelected(new Set()); setTab("ALL"); setErr(null); setJobId(null); };
+    const switchMedia = (m) => { setMedia(m); setSelected(new Set()); setTab("ALL"); setErr(null); setJobId(null); setVisibleCount(CLUSTERS_PAGE_SIZE); };
     // Starts the scan as a native Stash Task (runPluginTask), so it's tracked
     // in Stash's own Job Queue - visible, cancellable, with its own
     // completion notification - on top of this page's own progress polling.
@@ -826,9 +836,11 @@
     const clusters = media === "image" ? iClusters
       : (tab === "ALL" ? vClusters : vClusters.filter((c) => c.members.some((m) => m.level === tab)));
     const vTotal = vClusters.reduce((a, c) => a + c.members.length, 0);
+    const visibleClusters = clusters.slice(0, visibleCount);
 
     const tabBtn = (k, l) => e(Button, { key: k, size: "sm",
-      variant: tab === k ? "primary" : "outline-secondary", className: "pdc-tab", onClick: () => setTab(k) }, l);
+      variant: tab === k ? "primary" : "outline-secondary", className: "pdc-tab",
+      onClick: () => { setTab(k); setVisibleCount(CLUSTERS_PAGE_SIZE); } }, l);
     const mediaBtn = (k, l) => e(Button, { key: k, size: "sm",
       variant: media === k ? "primary" : "outline-light", onClick: () => switchMedia(k) }, l);
 
@@ -986,16 +998,27 @@
       clusters.length === 0
         ? e("div", { className: "pdc-empty" }, running ? "Scanning..."
             : `No ${media} duplicates yet. Run a scan.`)
-        : e("div", { className: "pdc-clusters" },
-            media === "image"
-              ? clusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c,
-                  keeperId: keeperOfImg(c), selected, onToggle: toggle,
-                  manual: iKeepMode === "MANUAL",
-                  onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
-              : clusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
-                  keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, quality, selected,
-                  manual: keepMode === "MANUAL", busy,
-                  onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper, onTransfer: transferMeta }))));
+        : e(React.Fragment, null,
+            e("div", { className: "pdc-clusters" },
+              media === "image"
+                ? visibleClusters.map((c) => e(ImageCard, { key: c.parent.image_id, cluster: c,
+                    keeperId: keeperOfImg(c), selected, onToggle: toggle,
+                    manual: iKeepMode === "MANUAL",
+                    onSetKeeper: setKeeper, onDeleteCluster: deleteImgCluster, busy }))
+                : visibleClusters.map((c) => e(VideoCard, { key: c.parent.scene_id, cluster: c,
+                    keeperId: keeperOf(c), keepLabel: keepLabelFor(c), dates, quality, selected,
+                    manual: keepMode === "MANUAL", busy,
+                    onToggle: toggle, onAll: selAll, onSetKeeper: setVKeeper, onTransfer: transferMeta }))),
+            clusters.length > visibleCount
+              ? e("div", { className: "pdc-loadmore" },
+                  e("span", { className: "pdc-loadmore-note" },
+                    `Showing ${visibleClusters.length} of ${clusters.length} group(s)`),
+                  e(Button, { variant: "outline-secondary", size: "sm",
+                    onClick: () => setVisibleCount((n) => n + CLUSTERS_PAGE_SIZE) },
+                    `Load ${Math.min(CLUSTERS_PAGE_SIZE, clusters.length - visibleCount)} more`),
+                  e(Button, { variant: "outline-secondary", size: "sm",
+                    onClick: () => setVisibleCount(clusters.length) }, "Show all"))
+              : null));
   };
 
   // ---- nav entries ------------------------------------------------------- //
@@ -1021,5 +1044,5 @@
     });
   } catch (ex) { console.error(`${LOG} menu patch failed`, ex); }
 
-  console.log(`${LOG} plugin loaded (v0.12.1)`);
+  console.log(`${LOG} plugin loaded (v0.13.0)`);
 })();

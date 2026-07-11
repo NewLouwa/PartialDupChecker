@@ -3,6 +3,17 @@
 All notable changes to this project are documented in this file.
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.13.0] - 2026-07-11
+
+### Added
+- **Batched rendering of groups**: the cluster list (videos and images) now
+  shows 25 groups at a time with "Load N more" / "Show all" at the bottom,
+  instead of mounting every group up front. On a library with thousands of
+  matches this keeps the page responsive - previously a large scan could make
+  the page sluggish enough to look like scanning had stalled or skipped most
+  of the library, when it was really just the render. Switching media, tab,
+  or the image match filter resets back to the first batch.
+
 ## [0.12.1] - 2026-07-10
 
 ### Fixed
